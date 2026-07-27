@@ -136,6 +136,9 @@ vibeusage statusline --limit 1           # Only the most urgent period per provi
 
 Inspired by OpenRouter-style routing, `vibeusage route` picks the best provider for a model based on real usage headroom from your own connected accounts.
 
+> [!NOTE]
+> vibeusage does not route model requests itself. It recommends the best choice among your configured providers. You can use that recommendation with a coding harness that supports multiple providers, such as OpenCode or Pi.
+
 You can route a model to the provider with the best current headroom:
 
 ```bash
