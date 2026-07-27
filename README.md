@@ -530,30 +530,44 @@ go install github.com/joshuadavidthomas/vibeusage@latest
 
 ### Setup
 
+Install [mise](https://mise.jdx.dev/) and [GitHub CLI](https://cli.github.com/), then set up the repository:
+
 ```bash
 git clone https://github.com/joshuadavidthomas/vibeusage.git
 cd vibeusage
+mise install
+gh auth status
+pre-commit install
 go mod download
 ```
+
+`mise.toml` pins the auxiliary tools shared by local development and CI. Go is pinned in `go.mod`; release-only tools and Actions are pinned in their workflows. Run `mise outdated` when updating the toolchain, update the pins, then run `just check`.
 
 ### Run tests
 
 ```bash
-go test ./...
-go test ./... -race -v
-go test ./... -cover
+just test
+just coverage
 ```
 
 ### Build
 
 ```bash
-go build -o vibeusage ./cmd/vibeusage
+just build
 ```
 
 ### Lint
 
+Run formatting, Go lint, and GitHub workflow checks through pre-commit:
+
 ```bash
-golangci-lint run
+just lint
+```
+
+Run the complete local check set with:
+
+```bash
+just check
 ```
 
 ### Release
