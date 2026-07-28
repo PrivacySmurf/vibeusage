@@ -132,11 +132,11 @@ func TestMigrateCredentials_PreservesOldDirOnReadError(t *testing.T) {
 	_ = os.Chmod(badDir, 0o000)
 	t.Cleanup(func() { _ = os.Chmod(badDir, 0o755) })
 
-	if err := MigrateCredentials(); err != nil {
-		t.Fatalf("MigrateCredentials() error: %v", err)
+	if err := MigrateCredentials(); err == nil {
+		t.Fatal("MigrateCredentials() should report the unreadable legacy files")
 	}
 
-	// Good credential should be migrated
+	// Good credential should still be migrated
 	data, _ := ReadCredential("claude", "oauth")
 	if data == nil {
 		t.Error("readable credential should be migrated")
@@ -145,6 +145,34 @@ func TestMigrateCredentials_PreservesOldDirOnReadError(t *testing.T) {
 	// Old directory should still exist because of the read error
 	if _, err := os.Stat(oldDir); os.IsNotExist(err) {
 		t.Error("old directory should be preserved when some files couldn't be read")
+	}
+}
+
+func TestMigrateCredentials_UnreadableLegacyDir(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("requires a chmod-induced Unix directory read failure")
+	}
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores directory permission bits")
+	}
+	dir := setupTempDir(t)
+
+	oldDir := filepath.Join(dir, "data", "credentials")
+	providerDir := filepath.Join(oldDir, "claude")
+	_ = os.MkdirAll(providerDir, 0o755)
+	_ = os.WriteFile(filepath.Join(providerDir, "oauth.json"), []byte(`{"token":"x"}`), 0o600)
+
+	_ = os.Chmod(oldDir, 0o000)
+	t.Cleanup(func() { _ = os.Chmod(oldDir, 0o755) })
+
+	if err := MigrateCredentials(); err == nil {
+		t.Fatal("MigrateCredentials() should error when the legacy directory is unreadable")
+	}
+
+	// Nothing should have been migrated
+	data, _ := ReadCredential("claude", "oauth")
+	if data != nil {
+		t.Error("credentials should not be migrated when the legacy directory is unreadable")
 	}
 }
 

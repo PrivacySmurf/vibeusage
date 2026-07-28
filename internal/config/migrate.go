@@ -2,6 +2,9 @@ package config
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -29,7 +32,10 @@ func MigrateCredentials() error {
 	readErrors := false
 	entries, err := os.ReadDir(oldDir)
 	if err != nil {
-		return nil // directory might be empty or unreadable, skip
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil // vanished between Stat and ReadDir
+		}
+		return fmt.Errorf("reading legacy credentials directory: %w", err)
 	}
 
 	for _, entry := range entries {
@@ -88,6 +94,8 @@ func MigrateCredentials() error {
 	// so the next migration attempt can pick them up.
 	if !readErrors {
 		_ = os.RemoveAll(oldDir)
+	} else {
+		return fmt.Errorf("some legacy credential files could not be read; they were left in %s for the next attempt", oldDir)
 	}
 
 	return nil
