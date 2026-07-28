@@ -10,6 +10,7 @@ var providerSources = map[string]string{
 	"gemini":   "google",
 	"kimicode": "moonshotai",
 	"minimax":  "minimax",
+	"opencode": "opencode-go",
 	"zai":      "zai",
 }
 

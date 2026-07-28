@@ -61,6 +61,18 @@ func testData(context.Context) (map[string]modelsDevProvider, error) {
 				"kimi-k2.5": {ID: "kimi-k2.5", Name: "Kimi K2.5", Family: "kimi"},
 			},
 		},
+		"opencode-go": {
+			ID:   "opencode-go",
+			Name: "OpenCode Go",
+			Models: map[string]modelsDevModel{
+				// Shares a normalized name with the moonshotai fixture model,
+				// exercising the dedup-merge path.
+				"kimi-k2.5": {ID: "kimi-k2.5", Name: "Kimi K2.5", Family: "kimi"},
+				// Go-only model with no origin-provider counterpart, so it
+				// registers as a new canonical model listing only opencode.
+				"kimi-k2.6": {ID: "kimi-k2.6", Name: "Kimi K2.6", Family: "kimi"},
+			},
+		},
 		"minimax": {
 			ID:   "minimax",
 			Name: "MiniMax",
@@ -174,6 +186,23 @@ func TestProvidersForModel(t *testing.T) {
 	// Cursor infers from anthropic.
 	if !has("cursor") {
 		t.Error("expected cursor in providers (inferred from anthropic)")
+	}
+
+	// OpenCode Go's kimi-k2.5 dedup-merges into the moonshotai fixture model.
+	goProviders := ProvidersForModel("kimi-k2.5")
+	hasGo := func(pid string) bool {
+		for _, p := range goProviders {
+			if p == pid {
+				return true
+			}
+		}
+		return false
+	}
+	if !hasGo("kimicode") {
+		t.Error("expected kimicode in kimi-k2.5 providers")
+	}
+	if !hasGo("opencode") {
+		t.Error("expected opencode in kimi-k2.5 providers (dedup-merged from opencode-go)")
 	}
 }
 
@@ -297,6 +326,18 @@ func TestListModelsForProvider(t *testing.T) {
 		if !found {
 			t.Errorf("model %q doesn't list claude as provider", m.ID)
 		}
+	}
+
+	opencodeModels := ListModelsForProvider("opencode")
+	ids := make(map[string]bool)
+	for _, m := range opencodeModels {
+		ids[m.ID] = true
+	}
+	if !ids["kimi-k2.5"] {
+		t.Error("expected dedup-merged kimi-k2.5 in opencode models")
+	}
+	if !ids["kimi-k2.6"] {
+		t.Error("expected Go-only kimi-k2.6 in opencode models")
 	}
 }
 

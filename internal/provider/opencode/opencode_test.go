@@ -17,7 +17,7 @@ import (
 	"github.com/joshuadavidthomas/vibeusage/internal/testenv"
 )
 
-const openCodeUsageBody = `rollingUsage:{status:"ok",resetInSec:3600,usagePercent:10},weeklyUsage:{status:"ok",resetInSec:7200,usagePercent:20}`
+const openCodeUsageBody = `rollingUsage:{status:"ok",resetInSec:3600,usagePercent:10},weeklyUsage:{status:"ok",resetInSec:7200,usagePercent:20},monthlyUsage:{status:"ok",resetInSec:14400,usagePercent:30}`
 
 func isolateOpenCodeTest(t *testing.T) {
 	t.Helper()
@@ -588,8 +588,8 @@ some html after`
 	if snapshot.Source != "web" {
 		t.Errorf("source = %q, want %q", snapshot.Source, "web")
 	}
-	if len(snapshot.Periods) != 2 {
-		t.Fatalf("len(periods) = %d, want 2", len(snapshot.Periods))
+	if len(snapshot.Periods) != 3 {
+		t.Fatalf("len(periods) = %d, want 3", len(snapshot.Periods))
 	}
 
 	r5h := snapshot.Periods[0]
@@ -616,6 +616,20 @@ some html after`
 	if w.PeriodType != models.PeriodWeekly {
 		t.Errorf("period_type = %q, want %q", w.PeriodType, models.PeriodWeekly)
 	}
+
+	m := snapshot.Periods[2]
+	if m.Name != "Monthly" {
+		t.Errorf("name = %q, want %q", m.Name, "Monthly")
+	}
+	if m.Utilization != 20 {
+		t.Errorf("utilization = %d, want 20", m.Utilization)
+	}
+	if m.PeriodType != models.PeriodMonthly {
+		t.Errorf("period_type = %q, want %q", m.PeriodType, models.PeriodMonthly)
+	}
+	if m.ResetsAt == nil {
+		t.Fatal("expected resets_at for monthly period")
+	}
 }
 
 func TestParseUsageFromSSR_NoData(t *testing.T) {
@@ -631,9 +645,22 @@ func TestParseUsageFromSSR_NoData(t *testing.T) {
 
 func TestParseUsageFromSSR_MonthlyOnly(t *testing.T) {
 	html := `monthlyUsage:{status:"ok",resetInSec:3600,usagePercent:50}`
-	_, err := parseUsageFromSSR(html)
-	if err == nil {
-		t.Fatal("expected error when only monthlyUsage is present")
+	snapshot, err := parseUsageFromSSR(html)
+	if err != nil {
+		t.Fatalf("parseUsageFromSSR failed: %v", err)
+	}
+	if len(snapshot.Periods) != 1 {
+		t.Fatalf("len(periods) = %d, want 1", len(snapshot.Periods))
+	}
+	m := snapshot.Periods[0]
+	if m.Name != "Monthly" {
+		t.Errorf("name = %q, want %q", m.Name, "Monthly")
+	}
+	if m.Utilization != 50 {
+		t.Errorf("utilization = %d, want 50", m.Utilization)
+	}
+	if m.PeriodType != models.PeriodMonthly {
+		t.Errorf("period_type = %q, want %q", m.PeriodType, models.PeriodMonthly)
 	}
 }
 

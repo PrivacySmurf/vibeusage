@@ -351,7 +351,7 @@ func parseZenBillingFromSSR(body string) *models.BillingDetail {
 func parseUsageFromSSR(body string) (*models.UsageSnapshot, error) {
 	matches := usagePattern.FindAllStringSubmatch(body, -1)
 	if len(matches) == 0 {
-		return nil, fmt.Errorf("no usage data found in SSR response; the page schema may have changed or the workspace may not have a Go subscription")
+		return nil, fmt.Errorf("no usage data found in SSR response (expected rollingUsage, weeklyUsage, or monthlyUsage); the page schema may have changed or the workspace may not have a Go subscription")
 	}
 
 	var periods []models.UsagePeriod
@@ -372,6 +372,9 @@ func parseUsageFromSSR(body string) (*models.UsageSnapshot, error) {
 		case "weeklyUsage":
 			periodName = "Weekly"
 			periodType = models.PeriodWeekly
+		case "monthlyUsage":
+			periodName = "Monthly"
+			periodType = models.PeriodMonthly
 		default:
 			continue
 		}
@@ -386,7 +389,7 @@ func parseUsageFromSSR(body string) (*models.UsageSnapshot, error) {
 	}
 
 	if len(periods) == 0 {
-		return nil, fmt.Errorf("no recognized usage windows found (expected rollingUsage or weeklyUsage)")
+		return nil, fmt.Errorf("no recognized usage windows found (expected rollingUsage, weeklyUsage, or monthlyUsage)")
 	}
 
 	snapshot := &models.UsageSnapshot{

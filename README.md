@@ -349,7 +349,7 @@ Run `vibeusage auth codex` to check for Codex CLI credentials and get setup inst
 
 #### OpenCode
 
-[opencode.ai](https://opencode.ai) — OpenCode's model service and coding subscription. Reports your Zen credit balance and, for Go subscribers, rolling 5-hour and weekly usage.
+[opencode.ai](https://opencode.ai) — OpenCode's model service and coding subscription. Reports your Zen credit balance and, for Go subscribers, rolling 5-hour, weekly, and monthly usage. [Smart routing](#smart-routing) ranks the opencode provider on those three windows. A few Go models (Grok 4.5, Kimi K3, MiMo-V2.5-Pro, DeepSeek V4 Pro) carry lower per-model allowances that are not yet visible to ranking, so those models may be recommended past their individual cap while the workspace windows show headroom.
 
 OpenCode requires the `auth` cookie from your browser session:
 

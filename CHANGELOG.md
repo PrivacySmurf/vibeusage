@@ -20,6 +20,11 @@ and this project attempts to adhere to [Semantic Versioning](https://semver.org/
 
 ## [Unreleased]
 
+### Added
+
+- Added OpenCode Go to `vibeusage route` smart routing, ranked on the rolling 5-hour, weekly, and monthly usage windows.
+- Added the monthly usage window to OpenCode usage reporting for Go subscribers.
+
 ## [0.12.0]
 
 ### Added
