@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -28,6 +29,13 @@ func writeSessionCredential(t *testing.T, content string) {
 	t.Helper()
 	if err := config.WriteCredential("opencode", "session", []byte(content)); err != nil {
 		t.Fatalf("write session credential: %v", err)
+	}
+}
+
+func makeCredentialsFileDirectory(t *testing.T) {
+	t.Helper()
+	if err := os.MkdirAll(config.CredentialsFile(), 0o700); err != nil {
+		t.Fatalf("create credentials file directory: %v", err)
 	}
 }
 
@@ -65,6 +73,24 @@ func TestWebStrategy_IsAvailable_NoCredential(t *testing.T) {
 
 	if (&WebStrategy{}).IsAvailable() {
 		t.Error("expected IsAvailable to be false without credential")
+	}
+}
+
+func TestWebStrategy_IsAvailable_WithCredential(t *testing.T) {
+	isolateOpenCodeTest(t)
+	writeSessionCredential(t, `{"session_token":"session-value"}`)
+
+	if !(&WebStrategy{}).IsAvailable() {
+		t.Error("expected IsAvailable to be true with credential")
+	}
+}
+
+func TestWebStrategy_IsAvailable_ReadError(t *testing.T) {
+	isolateOpenCodeTest(t)
+	makeCredentialsFileDirectory(t)
+
+	if (&WebStrategy{}).IsAvailable() {
+		t.Error("expected IsAvailable to be false after credential read error")
 	}
 }
 
@@ -126,6 +152,22 @@ func TestWorkspaceID_EnvironmentFallback(t *testing.T) {
 
 	if got := workspaceID(); got != "wrk_env" {
 		t.Errorf("workspaceID() = %q, want wrk_env", got)
+	}
+}
+
+func TestFetch_ReadErrorAllowsCacheFallback(t *testing.T) {
+	isolateOpenCodeTest(t)
+	makeCredentialsFileDirectory(t)
+
+	result, err := (&WebStrategy{}).Fetch(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Success || !result.ShouldFallback {
+		t.Fatalf("result = %#v, want fallback-eligible credential read failure", result)
+	}
+	if !strings.Contains(result.Error, "reading OpenCode session credential") {
+		t.Errorf("error = %q, want credential read context", result.Error)
 	}
 }
 

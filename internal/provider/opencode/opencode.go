@@ -91,7 +91,7 @@ type sessionCredentials struct {
 
 func (s *WebStrategy) IsAvailable() bool {
 	data, err := config.ReadCredential("opencode", "session")
-	return err != nil || data != nil
+	return err == nil && data != nil
 }
 
 func (s *WebStrategy) loadSessionToken() (string, error) {
@@ -135,7 +135,7 @@ type workspaceFailure struct {
 func (s *WebStrategy) Fetch(ctx context.Context) (fetch.FetchResult, error) {
 	sessionToken, err := s.loadSessionToken()
 	if err != nil {
-		return fetch.ResultFatal(err.Error()), nil
+		return fetch.ResultFail(err.Error()), nil
 	}
 	if sessionToken == "" {
 		return fetch.ResultFatal("no OpenCode session token found; run `vibeusage auth opencode` to set one up"), nil
