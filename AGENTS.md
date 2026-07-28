@@ -4,7 +4,7 @@
 - `just lint`: Run all pre-commit hooks
 - `just vet`: Run Go static analysis
 - `just vuln`: Check dependencies for known vulnerabilities
-- `just check`: Run tests, pre-commit hooks, static analysis, vulnerability checks, and module tidying
+- `just check`: Run tests, pre-commit hooks, static analysis, vulnerability checks, and a module-tidiness check (read-only; run `just tidy` to rewrite go.mod/go.sum)
 - `just fmt`: Format code
 - `just build`: Build the binary
 - `just coverage`: Run tests with coverage

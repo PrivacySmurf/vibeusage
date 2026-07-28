@@ -43,8 +43,12 @@ vuln:
     govulncheck ./...
 
 # Run all checks
-check: test lint vet vuln tidy
+check: test lint vet vuln tidy-check
 
 # Tidy go.mod/go.sum
 tidy:
     go mod tidy
+
+# Verify go.mod/go.sum are tidy without rewriting them
+tidy-check:
+    go mod tidy -diff
