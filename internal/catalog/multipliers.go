@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -16,91 +17,121 @@ import (
 	"github.com/joshuadavidthomas/vibeusage/internal/httpclient"
 )
 
-const multipliersURL = "https://raw.githubusercontent.com/github/docs/main/data/tables/copilot/model-multipliers.yml"
+const (
+	defaultGoMonthlyLimit = 60.0
 
-// ModelMultiplier holds the premium request multipliers for a Copilot model.
-type ModelMultiplier struct {
-	Name string   `json:"name"`
-	Paid *float64 `json:"paid,omitempty"` // nil = "Not applicable"
-	Free *float64 `json:"free,omitempty"` // nil = "Not applicable"
-}
-
-var (
-	multipliersMu      sync.Mutex
-	multipliersLoaded  bool
-	multipliersLoading chan struct{}
-	multipliersByName  map[string]ModelMultiplier
-	multipliersLoader  = loadMultipliers
+	copilotMultiplierProvider  = "copilot"
+	opencodeMultiplierProvider = "opencode"
 )
 
-func ensureMultipliersLoaded(ctx context.Context) error {
+// multiplierCatalog holds per-model cost multipliers by vibeusage provider ID.
+type multiplierCatalog map[string]map[string]float64
+
+// lazyLoader loads one catalog data set once, shares the in-flight request with
+// concurrent callers, and leaves canceled loads retryable.
+type lazyLoader[T any] struct {
+	mu      sync.Mutex
+	loaded  bool
+	loading chan struct{}
+	value   T
+	loader  func(context.Context) (T, error)
+}
+
+func (l *lazyLoader[T]) ensure(ctx context.Context, name string) error {
 	for {
 		if err := ctx.Err(); err != nil {
-			return fmt.Errorf("loading copilot multipliers: %w", err)
+			return fmt.Errorf("loading %s: %w", name, err)
 		}
 
-		multipliersMu.Lock()
-		if multipliersLoaded {
-			multipliersMu.Unlock()
+		l.mu.Lock()
+		if l.loaded {
+			l.mu.Unlock()
 			return nil
 		}
-		if done := multipliersLoading; done != nil {
-			multipliersMu.Unlock()
+		if done := l.loading; done != nil {
+			l.mu.Unlock()
 			select {
 			case <-done:
 				continue
 			case <-ctx.Done():
-				return fmt.Errorf("waiting for copilot multipliers: %w", ctx.Err())
+				return fmt.Errorf("waiting for %s: %w", name, ctx.Err())
 			}
 		}
 
 		done := make(chan struct{})
-		multipliersLoading = done
-		loader := multipliersLoader
-		multipliersMu.Unlock()
+		l.loading = done
+		loader := l.loader
+		l.mu.Unlock()
 
 		data, err := loader(ctx)
-		if err == nil {
-			if ctxErr := ctx.Err(); ctxErr != nil {
-				err = fmt.Errorf("loading copilot multipliers: %w", ctxErr)
-			}
-		}
-		if err == nil && data == nil {
-			data = make(map[string]ModelMultiplier)
+		if err == nil && ctx.Err() != nil {
+			err = fmt.Errorf("loading %s: %w", name, ctx.Err())
 		}
 
-		multipliersMu.Lock()
+		l.mu.Lock()
 		if err == nil {
-			if ctxErr := ctx.Err(); ctxErr != nil {
-				err = fmt.Errorf("loading copilot multipliers: %w", ctxErr)
+			if ctx.Err() != nil {
+				err = fmt.Errorf("loading %s: %w", name, ctx.Err())
 			} else {
-				multipliersByName = data
-				multipliersLoaded = true
+				l.value = data
+				l.loaded = true
 			}
 		}
-		multipliersLoading = nil
+		l.loading = nil
 		close(done)
-		multipliersMu.Unlock()
+		l.mu.Unlock()
 		return err
 	}
 }
 
-// LookupMultiplier returns the paid-plan multiplier for a model on copilot.
-// Returns nil if the model has no multiplier data (non-copilot provider or
-// unknown model). Returns a pointer to 0 for free models (0x cost).
-func LookupMultiplier(modelName string) *float64 {
+func (l *lazyLoader[T]) setLoaderForTesting(loader func(context.Context) (T, error), replace bool) func(context.Context) (T, error) {
+	for {
+		l.mu.Lock()
+		if done := l.loading; done != nil {
+			l.mu.Unlock()
+			<-done
+			continue
+		}
+		old := l.loader
+		if replace {
+			l.loader = loader
+		}
+		var zero T
+		l.loaded = false
+		l.value = zero
+		l.mu.Unlock()
+		return old
+	}
+}
+
+var (
+	multipliersURL   = "https://raw.githubusercontent.com/github/docs/main/data/tables/copilot/model-multipliers.yml"
+	goMultipliersURL = "https://raw.githubusercontent.com/anomalyco/opencode/dev/packages/web/src/content/docs/go.mdx"
+
+	multipliers = lazyLoader[multiplierCatalog]{loader: loadMultipliers}
+
+	goMonthlyLimitPattern = regexp.MustCompile(`(?m)(?:\*\*)?Monthly limit(?:\*\*)?\s+—\s+\$([0-9][0-9,.]*)\s+of usage`)
+	goPricingTableHeader  = []string{"Model", "Input", "Output", "Cached Read", "Cached Write", "Usage"}
+)
+
+func ensureMultipliersLoaded(ctx context.Context) error {
+	return multipliers.ensure(ctx, "model multipliers")
+}
+
+// LookupMultiplier returns the cost multiplier for a model from a provider.
+// It returns nil when the provider has no multiplier data for the model.
+func LookupMultiplier(providerID string, modelName string) *float64 {
 	_ = ensureMultipliersLoaded(context.Background())
 
-	// Try exact match first.
-	if m, ok := multipliersByName[modelName]; ok {
-		return m.Paid
+	providerMultipliers := multipliers.value[providerID]
+	if multiplier, ok := providerMultipliers[modelName]; ok {
+		return &multiplier
 	}
 
-	// Try normalized match (case-insensitive, hyphens = spaces).
 	key := normalizeName(modelName)
-	for name, m := range multipliersByName {
+	for name, multiplier := range providerMultipliers {
 		if normalizeName(name) == key {
-			return m.Paid
+			return &multiplier
 		}
 	}
 
@@ -110,187 +141,283 @@ func LookupMultiplier(modelName string) *float64 {
 // ResetMultipliersForTesting clears cached multiplier data.
 // Only use in serial tests.
 func ResetMultipliersForTesting() {
-	setMultipliersLoaderForTesting(nil, false)
+	multipliers.setLoaderForTesting(nil, false)
 }
 
 // SetMultipliersLoaderForTesting overrides the multiplier loader for tests.
-// Returns a cleanup function that restores the original loader.
-func SetMultipliersLoaderForTesting(loader func(context.Context) (map[string]ModelMultiplier, error)) func() {
-	old := setMultipliersLoaderForTesting(loader, true)
+// It returns a cleanup function that restores the original loader.
+func SetMultipliersLoaderForTesting(loader func(context.Context) (multiplierCatalog, error)) func() {
+	old := multipliers.setLoaderForTesting(loader, true)
 	return func() {
-		setMultipliersLoaderForTesting(old, true)
+		multipliers.setLoaderForTesting(old, true)
 	}
 }
 
-func setMultipliersLoaderForTesting(loader func(context.Context) (map[string]ModelMultiplier, error), replace bool) func(context.Context) (map[string]ModelMultiplier, error) {
-	for {
-		multipliersMu.Lock()
-		if done := multipliersLoading; done != nil {
-			multipliersMu.Unlock()
-			<-done
-			continue
-		}
-		old := multipliersLoader
-		if replace {
-			multipliersLoader = loader
-		}
-		multipliersLoaded = false
-		multipliersByName = nil
-		multipliersMu.Unlock()
-		return old
-	}
-}
-
-func loadMultipliers(ctx context.Context) (map[string]ModelMultiplier, error) {
+func loadMultipliers(ctx context.Context) (multiplierCatalog, error) {
 	if err := ctx.Err(); err != nil {
-		return nil, fmt.Errorf("loading copilot multipliers: %w", err)
+		return nil, fmt.Errorf("loading model multipliers: %w", err)
 	}
 
 	path := config.MultipliersFile()
-	if data := readMultipliersCacheIfFresh(path); data != nil {
-		if err := ctx.Err(); err != nil {
-			return nil, fmt.Errorf("loading copilot multipliers: %w", err)
-		}
-		return data, nil
+	if catalog, ok := readMultiplierCacheIfFresh(path); ok {
+		return catalog, nil
 	}
 
-	raw, err := fetchMultipliersYAML(ctx)
-	if err != nil {
-		if ctxErr := ctx.Err(); ctxErr != nil {
-			return nil, fmt.Errorf("loading copilot multipliers: %w", ctxErr)
-		}
-		// Network failed — serve stale cache.
-		if data := readMultipliersCache(path); data != nil {
-			if ctxErr := ctx.Err(); ctxErr != nil {
-				return nil, fmt.Errorf("loading copilot multipliers: %w", ctxErr)
-			}
-			return data, nil
-		}
-		if ctxErr := ctx.Err(); ctxErr != nil {
-			return nil, fmt.Errorf("loading copilot multipliers: %w", ctxErr)
-		}
-		return nil, nil
+	catalog, _ := readMultiplierCache(path)
+	if catalog == nil {
+		catalog = make(multiplierCatalog)
 	}
 
-	entries := parseMultipliersYAML(raw)
-	if entries == nil {
-		return nil, nil
+	copilotRefreshed := false
+	if raw, err := fetchMultipliersYAML(ctx); err != nil {
+		if ctx.Err() != nil {
+			return nil, fmt.Errorf("loading model multipliers: %w", ctx.Err())
+		}
+	} else if providerMultipliers := parseMultipliersYAML(raw); providerMultipliers == nil {
+		delete(catalog, copilotMultiplierProvider)
+	} else {
+		catalog[copilotMultiplierProvider] = providerMultipliers
+		copilotRefreshed = true
 	}
 
-	_ = writeMultipliersCache(path, entries)
-	return indexByName(entries), nil
+	goRefreshed := false
+	if raw, err := fetchGoMultipliersMarkdown(ctx); err != nil {
+		if ctx.Err() != nil {
+			return nil, fmt.Errorf("loading model multipliers: %w", ctx.Err())
+		}
+	} else if providerMultipliers := parseGoMultipliers(raw); providerMultipliers == nil {
+		delete(catalog, opencodeMultiplierProvider)
+	} else {
+		catalog[opencodeMultiplierProvider] = providerMultipliers
+		goRefreshed = true
+	}
+
+	// A single cache timestamp applies to both providers. Only refresh it after
+	// both sources succeed so a transient failure retries on the next command.
+	if copilotRefreshed && goRefreshed {
+		_ = writeMultiplierCache(path, catalog)
+	}
+	return catalog, nil
 }
 
-func readMultipliersCacheIfFresh(path string) map[string]ModelMultiplier {
+func readMultiplierCacheIfFresh(path string) (multiplierCatalog, bool) {
 	info, err := os.Stat(path)
-	if err != nil {
-		return nil
+	if err != nil || time.Since(info.ModTime()) > cacheTTL {
+		return nil, false
 	}
-	if time.Since(info.ModTime()) > cacheTTL {
-		return nil
-	}
-	return readMultipliersCache(path)
+	return readMultiplierCache(path)
 }
 
-func readMultipliersCache(path string) map[string]ModelMultiplier {
-	data, err := os.ReadFile(path)
+func readMultiplierCache(path string) (multiplierCatalog, bool) {
+	raw, err := os.ReadFile(path)
 	if err != nil {
-		return nil
+		return nil, false
 	}
-	var entries []ModelMultiplier
-	if err := json.Unmarshal(data, &entries); err != nil {
-		return nil
+	var catalog multiplierCatalog
+	if err := json.Unmarshal(raw, &catalog); err != nil || catalog == nil {
+		return nil, false
 	}
-	return indexByName(entries)
+	return catalog, true
 }
 
-func writeMultipliersCache(path string, entries []ModelMultiplier) error {
+func writeMultiplierCache(path string, catalog multiplierCatalog) error {
 	if err := os.MkdirAll(config.CacheDir(), 0o755); err != nil {
 		return err
 	}
-	data, err := json.Marshal(entries)
+	raw, err := json.Marshal(catalog)
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, data, 0o644)
+	return os.WriteFile(path, raw, 0o644)
 }
 
 func fetchMultipliersYAML(ctx context.Context) (string, error) {
+	return fetchCatalogText(ctx, multipliersURL, "Copilot multipliers")
+}
+
+func fetchGoMultipliersMarkdown(ctx context.Context) (string, error) {
+	return fetchCatalogText(ctx, goMultipliersURL, "OpenCode Go multipliers")
+}
+
+func fetchCatalogText(ctx context.Context, url string, name string) (string, error) {
 	client := httpclient.NewWithTimeout(15 * time.Second)
-	resp, err := client.DoCtx(ctx, "GET", multipliersURL, nil)
+	resp, err := client.DoCtx(ctx, "GET", url, nil)
 	if err != nil {
-		return "", fmt.Errorf("fetching copilot multipliers: %w", err)
+		return "", fmt.Errorf("fetching %s: %w", name, err)
 	}
 	if resp.StatusCode != 200 {
-		return "", fmt.Errorf("fetching copilot multipliers: HTTP %d", resp.StatusCode)
+		return "", fmt.Errorf("fetching %s: HTTP %d", name, resp.StatusCode)
 	}
 	return string(resp.Body), nil
 }
 
-// yamlMultiplierEntry is the raw YAML shape from github/docs. Paid and Free are
-// interface{} because the source mixes bare numbers (int/float) with the string
-// "Not applicable" in the same field.
+// yamlMultiplierEntry is the raw YAML shape from github/docs. Paid is an
+// interface{} because the source mixes bare numbers with "Not applicable".
 type yamlMultiplierEntry struct {
 	Name string      `yaml:"name"`
 	Paid interface{} `yaml:"multiplier_paid"`
-	Free interface{} `yaml:"multiplier_free"`
 }
 
-// parseMultipliersYAML parses the YAML format from github/docs.
-// Each entry is:
-//
-//   - name: MODEL_NAME
-//     multiplier_paid: NUMBER_OR_NOT_APPLICABLE
-//     multiplier_free: NUMBER_OR_NOT_APPLICABLE
-func parseMultipliersYAML(raw string) []ModelMultiplier {
+// parseMultipliersYAML parses Copilot's paid-plan multipliers.
+func parseMultipliersYAML(raw string) map[string]float64 {
 	var rows []yamlMultiplierEntry
 	if err := yaml.Unmarshal([]byte(raw), &rows); err != nil {
 		return nil
 	}
 
-	entries := make([]ModelMultiplier, 0, len(rows))
-	for _, r := range rows {
-		entries = append(entries, ModelMultiplier{
-			Name: r.Name,
-			Paid: convertYAMLMultiplier(r.Paid),
-			Free: convertYAMLMultiplier(r.Free),
-		})
+	multipliers := make(map[string]float64, len(rows))
+	for _, row := range rows {
+		if multiplier := convertYAMLMultiplier(row.Paid); multiplier != nil {
+			multipliers[row.Name] = *multiplier
+		}
 	}
-	return entries
+	return multipliers
 }
 
 // convertYAMLMultiplier converts a yaml.v3 scalar value (int, float64, or
-// string) to a *float64. Returns nil for "Not applicable" or unrecognised
+// string) to a *float64. It returns nil for "Not applicable" or unrecognised
 // values.
-func convertYAMLMultiplier(v interface{}) *float64 {
-	switch val := v.(type) {
+func convertYAMLMultiplier(value interface{}) *float64 {
+	switch value := value.(type) {
 	case int:
-		f := float64(val)
-		return &f
+		multiplier := float64(value)
+		return &multiplier
 	case float64:
-		return &val
+		return &value
 	case string:
-		return parseMultiplierValue(val)
+		return parseMultiplierValue(value)
 	default:
 		return nil
 	}
 }
 
-func parseMultiplierValue(s string) *float64 {
-	if strings.EqualFold(s, "not applicable") || s == "" {
+func parseMultiplierValue(value string) *float64 {
+	if strings.EqualFold(value, "not applicable") || value == "" {
 		return nil
 	}
-	v, err := strconv.ParseFloat(s, 64)
+	multiplier, err := strconv.ParseFloat(value, 64)
 	if err != nil {
 		return nil
 	}
-	return &v
+	return &multiplier
 }
 
-func indexByName(entries []ModelMultiplier) map[string]ModelMultiplier {
-	m := make(map[string]ModelMultiplier, len(entries))
-	for _, e := range entries {
-		m[e.Name] = e
+// parseGoMultipliers extracts OpenCode Go's per-model monthly allowance from
+// the published pricing table. A malformed table returns nil so routing falls
+// back to unadjusted workspace headroom rather than applying wrong costs.
+func parseGoMultipliers(raw string) map[string]float64 {
+	monthlyLimit := parseGoMonthlyLimit(raw)
+	multipliers := make(map[string]float64)
+	inTable := false
+	rows := 0
+
+	for _, line := range strings.Split(raw, "\n") {
+		cells, ok := markdownTableCells(line)
+		if !ok {
+			if inTable && rows > 0 {
+				if strings.Contains(line, "|") {
+					return nil
+				}
+				break
+			}
+			continue
+		}
+
+		if !inTable {
+			if sameCells(cells, goPricingTableHeader) {
+				inTable = true
+			}
+			continue
+		}
+
+		if markdownTableSeparator(cells) {
+			continue
+		}
+		if len(cells) != len(goPricingTableHeader) || cells[0] == "" {
+			return nil
+		}
+
+		usage, ok := parseGoDollar(cells[len(cells)-1])
+		if !ok || usage <= 0 {
+			return nil
+		}
+		name := stripTrailingParenthetical(cells[0])
+		if name == "" {
+			return nil
+		}
+		if usage < monthlyLimit {
+			multipliers[name] = monthlyLimit / usage
+		}
+		rows++
 	}
-	return m
+
+	if !inTable || rows == 0 {
+		return nil
+	}
+	return multipliers
+}
+
+func parseGoMonthlyLimit(raw string) float64 {
+	match := goMonthlyLimitPattern.FindStringSubmatch(raw)
+	if len(match) != 2 {
+		return defaultGoMonthlyLimit
+	}
+	limit, ok := parseGoDollar("$" + match[1])
+	if !ok || limit <= 0 {
+		return defaultGoMonthlyLimit
+	}
+	return limit
+}
+
+func markdownTableCells(line string) ([]string, bool) {
+	line = strings.TrimSpace(line)
+	if !strings.HasPrefix(line, "|") || !strings.HasSuffix(line, "|") {
+		return nil, false
+	}
+
+	cells := strings.Split(strings.TrimSuffix(strings.TrimPrefix(line, "|"), "|"), "|")
+	for i := range cells {
+		cells[i] = strings.TrimSpace(cells[i])
+	}
+	return cells, true
+}
+
+func sameCells(got, want []string) bool {
+	if len(got) != len(want) {
+		return false
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func markdownTableSeparator(cells []string) bool {
+	for _, cell := range cells {
+		if cell == "" || strings.Trim(cell, "-: ") != "" {
+			return false
+		}
+	}
+	return true
+}
+
+func parseGoDollar(value string) (float64, bool) {
+	value = strings.TrimSpace(value)
+	if !strings.HasPrefix(value, "$") {
+		return 0, false
+	}
+	amount, err := strconv.ParseFloat(strings.ReplaceAll(strings.TrimPrefix(value, "$"), ",", ""), 64)
+	if err != nil {
+		return 0, false
+	}
+	return amount, true
+}
+
+func stripTrailingParenthetical(name string) string {
+	if start := strings.LastIndex(name, " ("); start >= 0 && strings.HasSuffix(name, ")") {
+		return strings.TrimSpace(name[:start])
+	}
+	return strings.TrimSpace(name)
 }

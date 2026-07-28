@@ -133,9 +133,9 @@ func setLoaderForTesting(loader func(context.Context) (map[string]modelsDevProvi
 	}
 }
 
-// Preload explicitly loads model registry data and Copilot multipliers, making
-// the network fetch (if needed) happen at a known point instead of silently on
-// the first Lookup call. Successful loads are idempotent. Canceled or timed-out
+// Preload explicitly loads model registry data and multipliers, making the
+// network fetch (if needed) happen at a known point instead of silently on the
+// first Lookup call. Successful loads are idempotent. Canceled or timed-out
 // loads remain retryable.
 func Preload(ctx context.Context) error {
 	if err := ensureLoaded(ctx); err != nil {
@@ -144,7 +144,7 @@ func Preload(ctx context.Context) error {
 	return ensureMultipliersLoaded(ctx)
 }
 
-// CacheIsFresh reports whether both model-data cache files exist and are within
+// CacheIsFresh reports whether both catalog cache files exist and are within
 // their TTL. When false, Preload may make network calls; when true it will
 // return near-instantly from disk.
 func CacheIsFresh() bool {

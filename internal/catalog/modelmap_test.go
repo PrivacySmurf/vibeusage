@@ -457,7 +457,7 @@ func TestPreload_MakesDataAvailable(t *testing.T) {
 	cleanup := SetLoaderForTesting(testData)
 	t.Cleanup(cleanup)
 
-	multipliersCleanup := SetMultipliersLoaderForTesting(func(context.Context) (map[string]ModelMultiplier, error) {
+	multipliersCleanup := SetMultipliersLoaderForTesting(func(context.Context) (multiplierCatalog, error) {
 		return nil, nil
 	})
 	t.Cleanup(multipliersCleanup)
@@ -475,7 +475,7 @@ func TestPreload_Idempotent(t *testing.T) {
 	cleanup := SetLoaderForTesting(testData)
 	t.Cleanup(cleanup)
 
-	multipliersCleanup := SetMultipliersLoaderForTesting(func(context.Context) (map[string]ModelMultiplier, error) {
+	multipliersCleanup := SetMultipliersLoaderForTesting(func(context.Context) (multiplierCatalog, error) {
 		return nil, nil
 	})
 	t.Cleanup(multipliersCleanup)
@@ -507,7 +507,7 @@ func TestPreload_CanceledLoadRetries(t *testing.T) {
 	t.Cleanup(cleanup)
 
 	multiplierCalls := 0
-	multipliersCleanup := SetMultipliersLoaderForTesting(func(context.Context) (map[string]ModelMultiplier, error) {
+	multipliersCleanup := SetMultipliersLoaderForTesting(func(context.Context) (multiplierCatalog, error) {
 		multiplierCalls++
 		return nil, nil
 	})
@@ -556,14 +556,14 @@ func TestPreload_CanceledMultiplierLoadRetries(t *testing.T) {
 
 	started := make(chan struct{})
 	calls := 0
-	multipliersCleanup := SetMultipliersLoaderForTesting(func(ctx context.Context) (map[string]ModelMultiplier, error) {
+	multipliersCleanup := SetMultipliersLoaderForTesting(func(ctx context.Context) (multiplierCatalog, error) {
 		calls++
 		if calls == 1 {
 			close(started)
 			<-ctx.Done()
 			return nil, ctx.Err()
 		}
-		return map[string]ModelMultiplier{"GPT-4o": {Name: "GPT-4o"}}, nil
+		return multiplierCatalog{copilotMultiplierProvider: {}}, nil
 	})
 	t.Cleanup(multipliersCleanup)
 
@@ -579,10 +579,10 @@ func TestPreload_CanceledMultiplierLoadRetries(t *testing.T) {
 		t.Fatalf("first Preload() error = %v, want context.Canceled", err)
 	}
 
-	multipliersMu.Lock()
-	loaded := multipliersLoaded
-	data := multipliersByName
-	multipliersMu.Unlock()
+	multipliers.mu.Lock()
+	loaded := multipliers.loaded
+	data := multipliers.value
+	multipliers.mu.Unlock()
 	if loaded || data != nil {
 		t.Fatalf("canceled load published multipliers: loaded=%v data=%v", loaded, data)
 	}
@@ -641,6 +641,9 @@ func TestFetchHelpersHonorCanceledContext(t *testing.T) {
 	if _, err := fetchMultipliersYAML(ctx); !errors.Is(err, context.Canceled) {
 		t.Errorf("fetchMultipliersYAML() error = %v, want context.Canceled", err)
 	}
+	if _, err := fetchGoMultipliersMarkdown(ctx); !errors.Is(err, context.Canceled) {
+		t.Errorf("fetchGoMultipliersMarkdown() error = %v, want context.Canceled", err)
+	}
 }
 
 func TestCacheIsFresh_NoFiles(t *testing.T) {
@@ -657,7 +660,7 @@ func TestCacheIsFresh_FreshFiles(t *testing.T) {
 	t.Setenv("VIBEUSAGE_CACHE_DIR", dir)
 
 	_ = os.WriteFile(filepath.Join(dir, "models.json"), []byte("{}"), 0o644)
-	_ = os.WriteFile(filepath.Join(dir, "multipliers.json"), []byte("[]"), 0o644)
+	_ = os.WriteFile(filepath.Join(dir, "multipliers.json"), []byte("{}"), 0o644)
 
 	if !CacheIsFresh() {
 		t.Error("CacheIsFresh() = false with fresh cache files, want true")
@@ -671,7 +674,7 @@ func TestCacheIsFresh_StaleModelsFile(t *testing.T) {
 	modelsPath := filepath.Join(dir, "models.json")
 	multipliersPath := filepath.Join(dir, "multipliers.json")
 	_ = os.WriteFile(modelsPath, []byte("{}"), 0o644)
-	_ = os.WriteFile(multipliersPath, []byte("[]"), 0o644)
+	_ = os.WriteFile(multipliersPath, []byte("{}"), 0o644)
 
 	stale := time.Now().Add(-25 * time.Hour)
 	_ = os.Chtimes(modelsPath, stale, stale)
@@ -688,7 +691,7 @@ func TestCacheIsFresh_StaleMultipliersFile(t *testing.T) {
 	modelsPath := filepath.Join(dir, "models.json")
 	multipliersPath := filepath.Join(dir, "multipliers.json")
 	_ = os.WriteFile(modelsPath, []byte("{}"), 0o644)
-	_ = os.WriteFile(multipliersPath, []byte("[]"), 0o644)
+	_ = os.WriteFile(multipliersPath, []byte("{}"), 0o644)
 
 	stale := time.Now().Add(-25 * time.Hour)
 	_ = os.Chtimes(multipliersPath, stale, stale)

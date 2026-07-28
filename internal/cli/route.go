@@ -74,8 +74,8 @@ func init() {
 	routeCmd.Flags().String("role", "", "Route by role instead of specific model")
 }
 
-// preloadModelData loads the modelmap registry and Copilot multipliers up
-// front, at a known point in the route command lifecycle. When a network fetch
+// preloadModelData loads the modelmap registry and multipliers up front, at a
+// known point in the route command lifecycle. When a network fetch
 // is likely (cache stale or absent) and a spinner is appropriate, a brief
 // spinner is shown so the user knows what is happening. Once data is cached on
 // disk the call returns near-instantly with no visible output.
@@ -135,10 +135,7 @@ func lookupStrategies(id string) []fetch.Strategy {
 
 // lookupMultiplier returns the cost multiplier for a model+provider pair.
 func lookupMultiplier(modelName string, providerID string) *float64 {
-	if providerID == "copilot" {
-		return catalog.LookupMultiplier(modelName)
-	}
-	return nil
+	return catalog.LookupMultiplier(providerID, modelName)
 }
 
 // routeModel resolves a model query, fetches usage from all configured

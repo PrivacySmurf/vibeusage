@@ -24,6 +24,7 @@ and this project attempts to adhere to [Semantic Versioning](https://semver.org/
 
 - Added OpenCode Go to `vibeusage route` smart routing, ranked on the rolling 5-hour, weekly, and monthly usage windows.
 - Added the monthly usage window to OpenCode usage reporting for Go subscribers.
+- `vibeusage route` now applies OpenCode Go's per-model quota costs, so lower-allowance models rank against other providers on realistic headroom.
 
 ## [0.12.0]
 
