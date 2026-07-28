@@ -4,6 +4,7 @@ set -eu
 REPO="joshuadavidthomas/vibeusage"
 INSTALL_DIR="${VIBEUSAGE_INSTALL_DIR:-$HOME/.local/bin}"
 VERSION="${VIBEUSAGE_VERSION:-latest}"
+REQUIRE_ATTESTATION="${VIBEUSAGE_REQUIRE_ATTESTATION:-0}"
 
 need_cmd() {
   if ! command -v "$1" >/dev/null 2>&1; then
@@ -39,6 +40,24 @@ sha256_file() {
   fi
   echo "error: install requires sha256sum or shasum" >&2
   exit 1
+}
+
+# Verifies the downloaded archive against its GitHub build-provenance
+# attestation. Exit codes: 0 = verified, 1 = verification failed,
+# 2 = verification unavailable (no gh, unauthenticated gh, or the release
+# predates attestation support and has none published).
+verify_provenance() {
+  digest="$1"
+  if ! command -v gh >/dev/null 2>&1; then
+    return 2
+  fi
+  if ! gh auth status >/dev/null 2>&1; then
+    return 2
+  fi
+  if ! gh api "repos/${REPO}/attestations/sha256:${digest}" >/dev/null 2>&1; then
+    return 2
+  fi
+  gh attestation verify "$ARCHIVE_PATH" --repo "$REPO"
 }
 
 normalize_os() {
@@ -107,6 +126,28 @@ if [ "$EXPECTED_SUM" != "$ACTUAL_SUM" ]; then
   echo "actual:   $ACTUAL_SUM" >&2
   exit 1
 fi
+
+ATTESTATION_STATUS=0
+verify_provenance "$ACTUAL_SUM" || ATTESTATION_STATUS=$?
+case "$ATTESTATION_STATUS" in
+  0)
+    echo "Build provenance verified."
+    ;;
+  1)
+    echo "error: build provenance verification failed for ${ASSET}" >&2
+    echo "the archive does not match the provenance published for this release; aborting" >&2
+    exit 1
+    ;;
+  2)
+    if [ "$REQUIRE_ATTESTATION" = "1" ]; then
+      echo "error: VIBEUSAGE_REQUIRE_ATTESTATION=1 is set, but provenance verification is unavailable" >&2
+      echo "(needs an authenticated gh CLI and a release with published attestations)" >&2
+      exit 1
+    fi
+    echo "note: skipping build-provenance verification; verify manually with:"
+    echo "  gh attestation verify ${ASSET} --repo ${REPO}"
+    ;;
+esac
 
 mkdir -p "$INSTALL_DIR"
 tar -xzf "$ARCHIVE_PATH" -C "$TMP_DIR"
