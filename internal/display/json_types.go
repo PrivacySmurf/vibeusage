@@ -75,6 +75,31 @@ type ActionResultJSON struct {
 	Provider string `json:"provider,omitempty"`
 }
 
+// HistoryJSON represents historical usage trends grouped by provider.
+type HistoryJSON struct {
+	Providers map[string]HistoryProviderJSON `json:"providers"`
+}
+
+// HistoryProviderJSON represents a provider's history summary.
+type HistoryProviderJSON struct {
+	DaysRecorded int                 `json:"days_recorded"`
+	Samples      int                 `json:"samples"`
+	Periods      []HistoryPeriodJSON `json:"periods"`
+}
+
+// HistoryPeriodJSON represents a period's current usage and trends.
+type HistoryPeriodJSON struct {
+	Name                    string   `json:"name"`
+	PeriodType              string   `json:"period_type"`
+	Model                   string   `json:"model,omitempty"`
+	CurrentUtilization      int      `json:"current_utilization"`
+	SamePointLastPeriod     *int     `json:"same_point_last_period,omitempty"`
+	Delta                   *int     `json:"delta,omitempty"`
+	BurnPerDay              *float64 `json:"burn_per_day,omitempty"`
+	SamplesInPeriod         int      `json:"samples_in_period"`
+	LastCompletePeriodFinal *int     `json:"last_complete_period_final,omitempty"`
+}
+
 // UpdateStatusJSON represents update check/apply output.
 type UpdateStatusJSON struct {
 	CurrentVersion  string `json:"current_version"`

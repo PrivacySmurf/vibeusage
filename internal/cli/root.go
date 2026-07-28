@@ -89,6 +89,7 @@ func init() {
 	rootCmd.AddCommand(
 		authCmd,
 		configCmd,
+		historyCmd,
 		routeCmd,
 		statusCmd,
 		statuslineCmd,
