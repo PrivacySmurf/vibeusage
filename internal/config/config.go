@@ -228,7 +228,7 @@ func saveConfigFile(cfg Config, path string) error {
 	if err := toml.NewEncoder(&data).Encode(cfg); err != nil {
 		return fmt.Errorf("saving config: %w", err)
 	}
-	if err := atomicWriteFile(path, data.Bytes()); err != nil {
+	if err := AtomicWriteFile(path, data.Bytes()); err != nil {
 		return fmt.Errorf("saving config: %w", err)
 	}
 	return nil

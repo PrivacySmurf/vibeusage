@@ -40,6 +40,7 @@ func CacheDir() string {
 // credentialsDir returns the path to the legacy per-file credentials directory.
 // Used only for migration from the old per-file layout.
 func credentialsDir() string  { return filepath.Join(DataDir(), "credentials") }
+func HistoryDir() string      { return filepath.Join(DataDir(), "history") }
 func SnapshotsDir() string    { return filepath.Join(CacheDir(), "snapshots") }
 func OrgIDsDir() string       { return filepath.Join(CacheDir(), "org-ids") }
 func ThrottlesDir() string    { return filepath.Join(CacheDir(), "throttles") }

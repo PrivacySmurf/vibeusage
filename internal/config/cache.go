@@ -24,7 +24,7 @@ func CacheSnapshot(snapshot models.UsageSnapshot) error {
 	if err != nil {
 		return fmt.Errorf("caching snapshot for %s: %w", snapshot.Provider, err)
 	}
-	if err := atomicWriteFile(path, data); err != nil {
+	if err := AtomicWriteFile(path, data); err != nil {
 		return fmt.Errorf("caching snapshot for %s: %w", snapshot.Provider, err)
 	}
 	return nil
@@ -46,7 +46,9 @@ func LoadCachedSnapshot(providerID string) (*models.UsageSnapshot, error) {
 	return &snap, nil
 }
 
-func atomicWriteFile(path string, data []byte) (err error) {
+// AtomicWriteFile writes data through a same-directory temporary file, preserving
+// an existing file's mode before atomically replacing it.
+func AtomicWriteFile(path string, data []byte) (err error) {
 	var (
 		existingMode os.FileMode
 		pathExists   bool
@@ -153,7 +155,7 @@ func SaveThrottle(providerID string, marker fetch.ThrottleMarker) error {
 	if err != nil {
 		return fmt.Errorf("saving throttle for %s: %w", providerID, err)
 	}
-	if err := atomicWriteFile(path, data); err != nil {
+	if err := AtomicWriteFile(path, data); err != nil {
 		return fmt.Errorf("saving throttle for %s: %w", providerID, err)
 	}
 	return nil
