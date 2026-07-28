@@ -119,6 +119,11 @@ func ExecutePipeline(ctx context.Context, providerID string, strategies []Strate
 					logger.Warn("saving cached snapshot failed", "provider", providerID, "err", err)
 				}
 			}
+			if cfg.Recorder != nil {
+				if err := cfg.Recorder.Record(*result.Snapshot); err != nil {
+					logger.Warn("recording usage history failed", "provider", providerID, "err", err)
+				}
+			}
 			if cfg.Throttles != nil {
 				if err := cfg.Throttles.Clear(providerID); err != nil {
 					logger.Warn("clearing throttle marker failed", "provider", providerID, "err", err)

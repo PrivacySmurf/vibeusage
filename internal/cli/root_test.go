@@ -215,6 +215,21 @@ func TestConfigShow_JSONOutput(t *testing.T) {
 	if parsed.Path == "" {
 		t.Error("JSON output missing 'path'")
 	}
+	if !parsed.History.Enabled {
+		t.Error("JSON output should show history recording enabled by default")
+	}
+}
+
+func TestPipelineConfigFromConfig_HistoryRecorder(t *testing.T) {
+	cfg := config.DefaultConfig()
+	if pipelineConfigFromConfig(cfg).Recorder == nil {
+		t.Error("enabled history should configure a recorder")
+	}
+
+	cfg.History.Enabled = false
+	if pipelineConfigFromConfig(cfg).Recorder != nil {
+		t.Error("disabled history should not configure a recorder")
+	}
 }
 
 // Config path tests

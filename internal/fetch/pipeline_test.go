@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -55,6 +56,29 @@ func (c *memCache) Load(providerID string) (*models.UsageSnapshot, error) {
 		return nil, nil
 	}
 	return &s, nil
+}
+
+// memRecorder is a thread-safe in-memory Recorder for testing.
+type memRecorder struct {
+	mu        sync.Mutex
+	calls     []models.UsageSnapshot
+	recordErr error
+}
+
+func (r *memRecorder) Record(snap models.UsageSnapshot) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.recordErr != nil {
+		return r.recordErr
+	}
+	r.calls = append(r.calls, snap)
+	return nil
+}
+
+func (r *memRecorder) callCount() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return len(r.calls)
 }
 
 // memThrottles is a thread-safe in-memory ThrottleStore for testing.
@@ -343,6 +367,105 @@ func TestExecutePipeline_SuccessfulFetch(t *testing.T) {
 	// Source is derived from type name: *fetch.mockStrategy → "mock"
 	if outcome.Source != "mock" {
 		t.Errorf("expected source 'mock', got '%s'", outcome.Source)
+	}
+}
+
+func TestExecutePipeline_RecordsLiveFetch(t *testing.T) {
+	recorder := &memRecorder{}
+	snapshot := testSnapshot("test-provider", "mock", 42)
+	outcome := ExecutePipeline(context.Background(), "test-provider", []Strategy{
+		&mockStrategy{
+			available: true,
+			fetchFn: func(context.Context) (FetchResult, error) {
+				return ResultOK(snapshot), nil
+			},
+		},
+	}, false, PipelineConfig{Timeout: time.Second, Recorder: recorder})
+
+	if !outcome.Success {
+		t.Fatalf("expected live fetch success, got %+v", outcome)
+	}
+	if recorder.callCount() != 1 {
+		t.Errorf("recorder calls = %d, want 1", recorder.callCount())
+	}
+	if !reflect.DeepEqual(recorder.calls[0], snapshot) {
+		t.Errorf("recorded snapshot = %+v, want %+v", recorder.calls[0], snapshot)
+	}
+}
+
+func TestExecutePipeline_RecordingSkipsCachedOutcomes(t *testing.T) {
+	tests := []struct {
+		name      string
+		cache     *memCache
+		throttles *memThrottles
+		ttl       time.Duration
+		strategy  Strategy
+	}{
+		{
+			name:  "fresh cache",
+			cache: &memCache{data: map[string]models.UsageSnapshot{"test-provider": testSnapshot("test-provider", "cached", 30)}},
+			ttl:   time.Minute,
+			strategy: &mockStrategy{available: true, fetchFn: func(context.Context) (FetchResult, error) {
+				t.Fatal("fresh cache should skip the live fetch")
+				return FetchResult{}, nil
+			}},
+		},
+		{
+			name:  "throttle cache",
+			cache: &memCache{data: map[string]models.UsageSnapshot{"test-provider": testSnapshot("test-provider", "cached", 30)}},
+			throttles: &memThrottles{data: map[string]ThrottleMarker{"test-provider": {
+				RetryAt: time.Now().Add(time.Minute),
+			}}},
+			strategy: &mockStrategy{available: true, fetchFn: func(context.Context) (FetchResult, error) {
+				t.Fatal("throttle cache should skip the live fetch")
+				return FetchResult{}, nil
+			}},
+		},
+		{
+			name:  "failed fetch fallback",
+			cache: &memCache{data: map[string]models.UsageSnapshot{"test-provider": testSnapshot("test-provider", "cached", 30)}},
+			strategy: &mockStrategy{available: true, fetchFn: func(context.Context) (FetchResult, error) {
+				return ResultFail("API error"), nil
+			}},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			recorder := &memRecorder{}
+			cfg := PipelineConfig{
+				Timeout:       time.Second,
+				Cache:         tt.cache,
+				Recorder:      recorder,
+				FreshCacheTTL: tt.ttl,
+			}
+			if tt.throttles != nil {
+				cfg.Throttles = tt.throttles
+			}
+			outcome := ExecutePipeline(context.Background(), "test-provider", []Strategy{tt.strategy}, true, cfg)
+			if !outcome.Success || !outcome.Cached {
+				t.Fatalf("expected cached success, got %+v", outcome)
+			}
+			if recorder.callCount() != 0 {
+				t.Errorf("recorder calls = %d, want 0", recorder.callCount())
+			}
+		})
+	}
+}
+
+func TestExecutePipeline_RecordingFailurePreservesLiveSuccess(t *testing.T) {
+	recorder := &memRecorder{recordErr: errors.New("history write failed")}
+	outcome := ExecutePipeline(context.Background(), "test-provider", []Strategy{
+		&mockStrategy{
+			available: true,
+			fetchFn: func(context.Context) (FetchResult, error) {
+				return ResultOK(testSnapshot("test-provider", "mock", 42)), nil
+			},
+		},
+	}, false, PipelineConfig{Timeout: time.Second, Recorder: recorder})
+
+	if !outcome.Success || outcome.Snapshot == nil {
+		t.Errorf("recording failure changed live fetch outcome: %+v", outcome)
 	}
 }
 

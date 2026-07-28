@@ -39,6 +39,7 @@ type ConfigShowJSON struct {
 	Fetch       ConfigFetchJSON       `json:"fetch"`
 	Display     ConfigDisplayJSON     `json:"display"`
 	Credentials ConfigCredentialsJSON `json:"credentials"`
+	History     ConfigHistoryJSON     `json:"history"`
 	Roles       any                   `json:"roles"`
 	Path        string                `json:"path"`
 }
@@ -58,6 +59,11 @@ type ConfigDisplayJSON struct {
 // ConfigCredentialsJSON represents the credentials section of config.
 type ConfigCredentialsJSON struct {
 	UseKeyring bool `json:"use_keyring"`
+}
+
+// ConfigHistoryJSON represents the history section of config.
+type ConfigHistoryJSON struct {
+	Enabled bool `json:"enabled"`
 }
 
 // ActionResultJSON is a generic success/message response used by

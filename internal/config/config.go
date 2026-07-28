@@ -27,6 +27,10 @@ type CredentialsConfig struct {
 	UseKeyring bool `toml:"use_keyring" json:"use_keyring"`
 }
 
+type HistoryConfig struct {
+	Enabled bool `toml:"enabled" json:"enabled"`
+}
+
 type ProviderConfig struct {
 	Enabled     *bool  `toml:"enabled,omitempty" json:"enabled,omitempty"`
 	WorkspaceID string `toml:"workspace_id,omitempty" json:"workspace_id,omitempty"`
@@ -40,6 +44,7 @@ type Config struct {
 	Display     DisplayConfig             `toml:"display" json:"display"`
 	Fetch       FetchConfig               `toml:"fetch" json:"fetch"`
 	Credentials CredentialsConfig         `toml:"credentials" json:"credentials"`
+	History     HistoryConfig             `toml:"history" json:"history"`
 	Providers   map[string]ProviderConfig `toml:"providers" json:"providers"`
 	Roles       map[string]RoleConfig     `toml:"roles" json:"roles"`
 }
@@ -56,6 +61,9 @@ func DefaultConfig() Config {
 		},
 		Credentials: CredentialsConfig{
 			UseKeyring: false,
+		},
+		History: HistoryConfig{
+			Enabled: true,
 		},
 		Providers: make(map[string]ProviderConfig),
 		Roles:     make(map[string]RoleConfig),

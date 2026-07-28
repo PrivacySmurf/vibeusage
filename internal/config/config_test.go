@@ -92,6 +92,9 @@ func TestDefaultConfig_Values(t *testing.T) {
 	if cfg.Credentials.UseKeyring {
 		t.Error("Credentials.UseKeyring should default to false")
 	}
+	if !cfg.History.Enabled {
+		t.Error("History.Enabled should default to true")
+	}
 	if cfg.Providers == nil {
 		t.Error("Providers map should be initialized (non-nil)")
 	}
@@ -297,6 +300,32 @@ timeout = 10.0
 	}
 	if !cfg.Display.ShowRemaining {
 		t.Error("Display.ShowRemaining should default to true when not in file")
+	}
+}
+
+func TestLoad_HistoryEnabledDefaultAndOptOut(t *testing.T) {
+	dir := setupTempDir(t)
+	tests := []struct {
+		name    string
+		content string
+		want    bool
+	}{
+		{name: "omitted", content: "[fetch]\ntimeout = 15.0\n", want: true},
+		{name: "disabled", content: "[history]\nenabled = false\n", want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := filepath.Join(dir, tt.name+".toml")
+			writeTestFile(t, path, []byte(tt.content))
+			cfg, err := Load(path)
+			if err != nil {
+				t.Fatalf("Load() error: %v", err)
+			}
+			if cfg.History.Enabled != tt.want {
+				t.Errorf("History.Enabled = %v, want %v", cfg.History.Enabled, tt.want)
+			}
+		})
 	}
 }
 

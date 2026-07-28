@@ -38,6 +38,9 @@ var configShowCmd = &cobra.Command{
 				Credentials: display.ConfigCredentialsJSON{
 					UseKeyring: cfg.Credentials.UseKeyring,
 				},
+				History: display.ConfigHistoryJSON{
+					Enabled: cfg.History.Enabled,
+				},
 				Roles: cfg.Roles,
 				Path:  cfgPath,
 			})

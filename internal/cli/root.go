@@ -14,6 +14,7 @@ import (
 	"github.com/joshuadavidthomas/vibeusage/internal/config"
 	"github.com/joshuadavidthomas/vibeusage/internal/display"
 	"github.com/joshuadavidthomas/vibeusage/internal/fetch"
+	"github.com/joshuadavidthomas/vibeusage/internal/history"
 	"github.com/joshuadavidthomas/vibeusage/internal/logging"
 	"github.com/joshuadavidthomas/vibeusage/internal/models"
 	"github.com/joshuadavidthomas/vibeusage/internal/provider"
@@ -433,12 +434,16 @@ func pipelineConfigFromConfig(cfg config.Config) fetch.PipelineConfig {
 	// this window entirely.
 	const freshSnapshotReuseTTL = 60 * time.Second
 
-	return fetch.PipelineConfig{
+	pipelineConfig := fetch.PipelineConfig{
 		Timeout:       time.Duration(cfg.Fetch.Timeout * float64(time.Second)),
 		Cache:         config.FileCache{},
 		Throttles:     config.FileThrottleStore{},
 		FreshCacheTTL: freshSnapshotReuseTTL,
 	}
+	if cfg.History.Enabled {
+		pipelineConfig.Recorder = history.PipelineRecorder{}
+	}
+	return pipelineConfig
 }
 
 func orchestratorConfigFromConfig(cfg config.Config) fetch.OrchestratorConfig {

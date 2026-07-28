@@ -17,6 +17,13 @@ type Cache interface {
 	Load(providerID string) (*models.UsageSnapshot, error)
 }
 
+// Recorder persists a successfully fetched snapshot to long-term history.
+// Implementations must tolerate frequent, concurrent calls; failures are
+// logged by the pipeline and never fail the fetch.
+type Recorder interface {
+	Record(snapshot models.UsageSnapshot) error
+}
+
 // ThrottleMarker is a persisted record that a provider asked us to stop
 // making requests until RetryAt. Populated from a 429 response's Retry-After
 // header (or a sensible default when the header is missing).
@@ -39,6 +46,7 @@ type ThrottleStore interface {
 type PipelineConfig struct {
 	Timeout       time.Duration
 	Cache         Cache
+	Recorder      Recorder
 	Throttles     ThrottleStore
 	FreshCacheTTL time.Duration
 }
