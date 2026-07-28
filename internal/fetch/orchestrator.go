@@ -25,10 +25,15 @@ func FetchAllProviders(ctx context.Context, providerMap map[string][]Strategy, u
 		wg.Add(1)
 		go func(providerID string, strats []Strategy) {
 			defer wg.Done()
-			sem <- struct{}{}
-			defer func() { <-sem }()
 
-			outcome := ExecutePipeline(ctx, providerID, strats, useCache, cfg.Pipeline)
+			var outcome FetchOutcome
+			select {
+			case sem <- struct{}{}:
+				defer func() { <-sem }()
+				outcome = ExecutePipeline(ctx, providerID, strats, useCache, cfg.Pipeline)
+			case <-ctx.Done():
+				outcome = contextCancelledOutcome(providerID)
+			}
 
 			mu.Lock()
 			outcomes[providerID] = outcome

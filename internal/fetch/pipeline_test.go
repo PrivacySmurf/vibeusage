@@ -155,6 +155,131 @@ func TestExecutePipeline_ContextCancellation(t *testing.T) {
 	}
 }
 
+func TestExecutePipeline_PreCancelledContextRejectsFreshCache(t *testing.T) {
+	cache := newMemCache()
+	cache.data["test-provider"] = models.UsageSnapshot{
+		Provider:  "test-provider",
+		FetchedAt: time.Now().Add(-500 * time.Millisecond).UTC(),
+		Periods:   []models.UsagePeriod{{Name: "monthly", Utilization: 30}},
+		Source:    "previous-fetch",
+	}
+
+	cfg := PipelineConfig{
+		Timeout:       30 * time.Second,
+		Cache:         cache,
+		FreshCacheTTL: time.Second,
+	}
+
+	strategy := &mockStrategy{
+		available: true,
+		fetchFn: func(ctx context.Context) (FetchResult, error) {
+			t.Fatal("should not fetch for a cancelled context")
+			return FetchResult{}, nil
+		},
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	outcome := ExecutePipeline(ctx, "test-provider", []Strategy{strategy}, true, cfg)
+
+	if outcome.Success {
+		t.Error("expected failure for cancelled context, got cached success")
+	}
+	if outcome.Error != "Context cancelled" {
+		t.Errorf("expected 'Context cancelled' error, got: %s", outcome.Error)
+	}
+	if outcome.Cached || outcome.Source == "cache" {
+		t.Errorf("expected cache not to be reported as source, got Cached=%v Source=%q", outcome.Cached, outcome.Source)
+	}
+}
+
+func TestExecutePipeline_CancelledDuringLoopRejectsFallbackCache(t *testing.T) {
+	cache := newMemCache()
+	cache.data["test-provider"] = models.UsageSnapshot{
+		Provider:  "test-provider",
+		FetchedAt: time.Now().Add(-2 * time.Hour).UTC(),
+		Periods:   []models.UsagePeriod{{Name: "monthly", Utilization: 30}},
+		Source:    "previous-fetch",
+	}
+
+	cfg := PipelineConfig{
+		Timeout: 30 * time.Second,
+		Cache:   cache,
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	strategy := &mockStrategy{
+		available: true,
+		fetchFn: func(ctx context.Context) (FetchResult, error) {
+			cancel()
+			return ResultFail("API error"), nil
+		},
+	}
+
+	outcome := ExecutePipeline(ctx, "test-provider", []Strategy{strategy}, true, cfg)
+
+	if outcome.Success {
+		t.Error("expected failure for cancelled context, got cached success")
+	}
+	if outcome.Error != "Context cancelled" {
+		t.Errorf("expected 'Context cancelled' error, got: %s", outcome.Error)
+	}
+	if outcome.Cached {
+		t.Error("expected fallback cache not to be served to a cancelled context")
+	}
+}
+
+// cancelOnLoadCache cancels the context while the fallback cache is being
+// loaded, simulating cancellation that arrives after the strategy loop
+// finishes but before the cached snapshot is served.
+type cancelOnLoadCache struct {
+	*memCache
+	cancel context.CancelFunc
+}
+
+func (c *cancelOnLoadCache) Load(providerID string) (*models.UsageSnapshot, error) {
+	c.cancel()
+	return c.memCache.Load(providerID)
+}
+
+func TestExecutePipeline_CancelledBeforeFallbackReturnRejectsCache(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	mem := newMemCache()
+	mem.data["test-provider"] = models.UsageSnapshot{
+		Provider:  "test-provider",
+		FetchedAt: time.Now().Add(-2 * time.Hour).UTC(),
+		Periods:   []models.UsagePeriod{{Name: "monthly", Utilization: 30}},
+		Source:    "previous-fetch",
+	}
+
+	cfg := PipelineConfig{
+		Timeout: 30 * time.Second,
+		Cache:   &cancelOnLoadCache{memCache: mem, cancel: cancel},
+	}
+
+	strategy := &mockStrategy{
+		available: true,
+		fetchFn: func(ctx context.Context) (FetchResult, error) {
+			return ResultFail("API error"), nil
+		},
+	}
+
+	outcome := ExecutePipeline(ctx, "test-provider", []Strategy{strategy}, true, cfg)
+
+	if outcome.Success {
+		t.Error("expected failure for cancelled context, got cached success")
+	}
+	if outcome.Error != "Context cancelled" {
+		t.Errorf("expected 'Context cancelled' error, got: %s", outcome.Error)
+	}
+	if outcome.Cached {
+		t.Error("expected fallback cache not to be served to a cancelled context")
+	}
+}
+
 func TestExecutePipeline_ContextPassedToStrategy(t *testing.T) {
 	var receivedCtx context.Context
 

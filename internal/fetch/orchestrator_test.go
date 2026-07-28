@@ -5,6 +5,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/joshuadavidthomas/vibeusage/internal/models"
 )
@@ -212,6 +213,69 @@ func TestFetchAllProviders_ContextCancellation(t *testing.T) {
 	}
 	if o.Success {
 		t.Error("expected failure for cancelled context")
+	}
+}
+
+func TestFetchAllProviders_CancelSkipsQueuedProviders(t *testing.T) {
+	cfg := OrchestratorConfig{
+		MaxConcurrent: 1,
+		Pipeline:      defaultTestPipelineCfg(),
+	}
+
+	started := make(chan struct{}, 1)
+	blockingStrategy := func() []Strategy {
+		return []Strategy{
+			&mockStrategy{
+				available: true,
+				fetchFn: func(ctx context.Context) (FetchResult, error) {
+					select {
+					case started <- struct{}{}:
+					default:
+					}
+					<-ctx.Done()
+					return ResultFail("cancelled"), ctx.Err()
+				},
+			},
+		}
+	}
+
+	providerMap := map[string][]Strategy{
+		"p1": blockingStrategy(),
+		"p2": blockingStrategy(),
+		"p3": blockingStrategy(),
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	outcomesCh := make(chan map[string]FetchOutcome, 1)
+	go func() {
+		outcomesCh <- FetchAllProviders(ctx, providerMap, false, cfg, nil)
+	}()
+
+	<-started // one provider holds the only slot; the rest are queued
+	cancel()
+
+	var outcomes map[string]FetchOutcome
+	select {
+	case outcomes = <-outcomesCh:
+	case <-time.After(5 * time.Second):
+		t.Fatal("FetchAllProviders did not return promptly after cancellation")
+	}
+
+	if len(outcomes) != 3 {
+		t.Fatalf("expected 3 outcomes, got %d", len(outcomes))
+	}
+	for _, pid := range []string{"p1", "p2", "p3"} {
+		o, ok := outcomes[pid]
+		if !ok {
+			t.Errorf("missing outcome for %q", pid)
+			continue
+		}
+		if o.Success {
+			t.Errorf("%s: expected failure for cancelled context", pid)
+		}
+		if o.Error != "Context cancelled" {
+			t.Errorf("%s: error = %q, want %q", pid, o.Error, "Context cancelled")
+		}
 	}
 }
 

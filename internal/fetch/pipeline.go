@@ -18,6 +18,12 @@ func ExecutePipeline(ctx context.Context, providerID string, strategies []Strate
 	anyAttempted := false
 	lastErr := ""
 
+	// Refuse to serve cache or fetch when the caller already cancelled;
+	// a canceled run must not report stale usage as success.
+	if ctx.Err() != nil {
+		return contextCancelledOutcome(providerID)
+	}
+
 	// Honor a persisted rate-limit cooldown before any network attempt.
 	// Within the window, serve cache if present; otherwise surface the
 	// cooldown as the error so the user sees why nothing fetched.
@@ -86,11 +92,7 @@ func ExecutePipeline(ctx context.Context, providerID string, strategies []Strate
 		cancel()
 
 		if ctx.Err() != nil {
-			return FetchOutcome{
-				ProviderID: providerID,
-				Success:    false,
-				Error:      "Context cancelled",
-			}
+			return contextCancelledOutcome(providerID)
 		}
 		if attemptErr == context.DeadlineExceeded {
 			lastErr = "Fetch timed out"
@@ -153,6 +155,9 @@ func ExecutePipeline(ctx context.Context, providerID string, strategies []Strate
 			cached = nil
 		}
 		if cached != nil && anyAttempted {
+			if ctx.Err() != nil {
+				return contextCancelledOutcome(providerID)
+			}
 			return FetchOutcome{
 				ProviderID: providerID,
 				Success:    true,
@@ -171,6 +176,16 @@ func ExecutePipeline(ctx context.Context, providerID string, strategies []Strate
 		ProviderID: providerID,
 		Success:    false,
 		Error:      lastErr,
+	}
+}
+
+// contextCancelledOutcome reports a fetch aborted by caller cancellation.
+// Tests assert on the "Context cancelled" string — grep before renaming.
+func contextCancelledOutcome(providerID string) FetchOutcome {
+	return FetchOutcome{
+		ProviderID: providerID,
+		Success:    false,
+		Error:      "Context cancelled",
 	}
 }
 
