@@ -123,8 +123,7 @@ func showUpdateCheckHeader(cmd *cobra.Command) {
 		return
 	}
 
-	switch cmd.Name() {
-	case "completion", "help", "statusline", "update":
+	if skipsUpdateCheckHeader(cmd.Name()) {
 		return
 	}
 
@@ -159,6 +158,15 @@ func showUpdateCheckHeader(cmd *cobra.Command) {
 		),
 	)
 	_, _ = fmt.Fprintln(outWriter)
+}
+
+func skipsUpdateCheckHeader(commandName string) bool {
+	switch commandName {
+	case "completion", "help", "record", "statusline", "update":
+		return true
+	default:
+		return false
+	}
 }
 
 func refreshUpdateCheckCache(client *updater.Client, cached *updater.LatestReleaseInfo) *updater.LatestReleaseInfo {

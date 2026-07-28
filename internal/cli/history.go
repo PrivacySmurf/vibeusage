@@ -32,11 +32,19 @@ var historyClearCmd = &cobra.Command{
 	RunE:  runHistoryClear,
 }
 
+var historyRecordCmd = &cobra.Command{
+	Use:   "record",
+	Short: "Record usage history for scheduled collection",
+	Long:  "Fetch usage from every enabled provider and record it locally. Use this command with cron, systemd timers, or launchd agents; see the README for scheduling examples.",
+	Args:  cobra.NoArgs,
+	RunE:  runHistoryRecord,
+}
+
 var historyClearForce bool
 
 func init() {
 	historyClearCmd.Flags().BoolVarP(&historyClearForce, "force", "f", false, "Clear without confirmation")
-	historyCmd.AddCommand(historyClearCmd)
+	historyCmd.AddCommand(historyClearCmd, historyRecordCmd)
 }
 
 func runHistory(cmd *cobra.Command, args []string) error {
@@ -79,6 +87,50 @@ func runHistory(cmd *cobra.Command, args []string) error {
 		return display.OutputJSON(outWriter, report)
 	}
 	return renderHistoryReport(report, providerIDs)
+}
+
+func runHistoryRecord(cmd *cobra.Command, args []string) error {
+	cfg := config.Get()
+	providerMap := buildProviderMap()
+	providerIDs, err := historyProviderIDs(providerMap, cfg, nil)
+	if err != nil {
+		return err
+	}
+
+	filteredMap := make(map[string][]fetch.Strategy, len(providerIDs))
+	attempted := 0
+	for _, providerID := range providerIDs {
+		strategies := providerMap[providerID]
+		filteredMap[providerID] = strategies
+		if hasAvailableStrategy(strategies) {
+			attempted++
+		}
+	}
+
+	outcomes := fetch.FetchAllProviders(cmd.Context(), filteredMap, !noCache, orchestratorConfigFromConfig(cfg), nil)
+	return historyRecordResult(outcomes, attempted)
+}
+
+func historyRecordResult(outcomes map[string]fetch.FetchOutcome, attempted int) error {
+	if attempted == 0 {
+		return fmt.Errorf("history record: no enabled providers are authenticated. Run `vibeusage auth` to enable a provider")
+	}
+
+	for _, outcome := range outcomes {
+		if outcome.Success && outcome.Snapshot != nil {
+			return nil
+		}
+	}
+	return fmt.Errorf("history record: all %d providers failed", attempted)
+}
+
+func hasAvailableStrategy(strategies []fetch.Strategy) bool {
+	for _, strategy := range strategies {
+		if strategy.IsAvailable() {
+			return true
+		}
+	}
+	return false
 }
 
 func historyProviderIDs(providerMap map[string][]fetch.Strategy, cfg config.Config, args []string) ([]string, error) {

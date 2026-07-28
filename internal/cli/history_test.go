@@ -99,6 +99,53 @@ func TestHistoryProviderJSONAndTable(t *testing.T) {
 	}
 }
 
+func TestHistoryRecordResult(t *testing.T) {
+	tests := []struct {
+		name      string
+		outcomes  map[string]fetch.FetchOutcome
+		attempted int
+		wantErr   string
+	}{
+		{
+			name: "some providers succeed",
+			outcomes: map[string]fetch.FetchOutcome{
+				"claude": {Success: true, Snapshot: &models.UsageSnapshot{}},
+				"codex":  {Success: false, Error: "request failed"},
+			},
+			attempted: 2,
+		},
+		{
+			name: "all attempted providers fail",
+			outcomes: map[string]fetch.FetchOutcome{
+				"claude": {Success: false, Error: "request failed"},
+				"codex":  {Success: false, Error: "request failed"},
+			},
+			attempted: 2,
+			wantErr:   "history record: all 2 providers failed",
+		},
+		{
+			name:      "no enabled providers are authenticated",
+			attempted: 0,
+			wantErr:   "history record: no enabled providers are authenticated",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := historyRecordResult(tt.outcomes, tt.attempted)
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Fatalf("historyRecordResult() error = %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Errorf("historyRecordResult() error = %v, want containing %q", err, tt.wantErr)
+			}
+		})
+	}
+}
+
 func TestHistoryClearPromptsAndClearsOneProvider(t *testing.T) {
 	testenv.ApplyVibeusage(t.Setenv, t.TempDir())
 	at := time.Now().Add(-time.Minute)
@@ -220,9 +267,16 @@ func TestHistoryClearForceAndQuietBypassPrompt(t *testing.T) {
 
 func TestHistoryCommandRegistered(t *testing.T) {
 	for _, cmd := range rootCmd.Commands() {
-		if cmd.Name() == "history" {
-			return
+		if cmd.Name() != "history" {
+			continue
 		}
+		for _, subcommand := range cmd.Commands() {
+			if subcommand.Name() == "record" {
+				return
+			}
+		}
+		t.Error("history command does not register record")
+		return
 	}
 	t.Error("root command does not register history")
 }

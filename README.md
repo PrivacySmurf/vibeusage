@@ -142,6 +142,86 @@ vibeusage statusline -p claude -p codex  # Multiple providers
 vibeusage statusline --limit 1           # Only the most urgent period per provider
 ```
 
+## Usage History
+
+vibeusage records one utilization snapshot for each provider after a live fetch. It stores these local JSONL files in `$XDG_DATA_HOME/vibeusage/history/` (usually `~/.local/share/vibeusage/history/`); set `VIBEUSAGE_DATA_DIR` to place them elsewhere. Each provider keeps at most 90 days or 8 MiB of records, with the oldest records dropped first.
+
+View history and trends:
+
+```bash
+vibeusage history
+vibeusage history claude
+vibeusage history --json
+vibeusage history clear claude
+vibeusage history clear --force  # Clear all history without a prompt, for scripts
+```
+
+Stop future recording by adding this to `config.toml`:
+
+```toml
+[history]
+enabled = false
+```
+
+### Scheduled collection
+
+For regular samples, schedule `vibeusage history record` yourself. The command fetches every enabled provider, records successful fetches, prints nothing on success, and returns a non-zero exit only when every authenticated provider fails. Choose the binary path for your installation; `which vibeusage` shows it.
+
+Cron, every 15 minutes:
+
+```cron
+*/15 * * * * /usr/local/bin/vibeusage history record
+```
+
+A systemd user timer, every 15 minutes:
+
+```ini
+# ~/.config/systemd/user/vibeusage-history.service
+[Unit]
+Description=Record vibeusage history
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/vibeusage history record
+
+# ~/.config/systemd/user/vibeusage-history.timer
+[Unit]
+Description=Run vibeusage history collection every 15 minutes
+
+[Timer]
+OnCalendar=*:0/15
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+```
+
+A launchd agent, every 15 minutes:
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- ~/Library/LaunchAgents/dev.joshthomas.vibeusage.history.plist -->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>dev.joshthomas.vibeusage.history</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/local/bin/vibeusage</string>
+    <string>history</string>
+    <string>record</string>
+  </array>
+  <key>StartInterval</key>
+  <integer>900</integer>
+</dict>
+</plist>
+```
+
+Timers run with a minimal environment. Credentials that rely on a login shell, including environment variables and some keychains, may not resolve; prefer an auth method that does not. Pipeline throttling makes an over-frequent timer safe but wasteful, so run it every 15–30 minutes.
+
+History contains utilization numbers only: never prompts, code, or credentials.
+
 ## Smart Routing
 
 Inspired by OpenRouter-style routing, `vibeusage route` picks the best provider for a model based on real usage headroom from your own connected accounts.

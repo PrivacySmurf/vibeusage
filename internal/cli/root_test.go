@@ -70,6 +70,17 @@ func TestRootCmd_HasPersistentFlags(t *testing.T) {
 	}
 }
 
+func TestSkipsUpdateCheckHeader(t *testing.T) {
+	for _, commandName := range []string{"completion", "help", "record", "statusline", "update"} {
+		if !skipsUpdateCheckHeader(commandName) {
+			t.Errorf("skipsUpdateCheckHeader(%q) = false, want true", commandName)
+		}
+	}
+	if skipsUpdateCheckHeader("history") {
+		t.Error("skipsUpdateCheckHeader(\"history\") = true, want false")
+	}
+}
+
 func TestAllCommands_FlagMergingDoesNotPanic(t *testing.T) {
 	paths := collectCommandPaths(rootCmd, nil)
 	for _, path := range paths {
