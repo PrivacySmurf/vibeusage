@@ -1,7 +1,10 @@
 package copilot
 
 import (
+	"context"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -10,6 +13,98 @@ import (
 	"github.com/joshuadavidthomas/vibeusage/internal/models"
 	"github.com/joshuadavidthomas/vibeusage/internal/testenv"
 )
+
+func TestCredentialSources_ListsUsableEnvironmentTokens(t *testing.T) {
+	info := (Copilot{}).CredentialSources()
+	want := []string{"COPILOT_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN"}
+	if len(info.EnvVars) != len(want) {
+		t.Fatalf("EnvVars = %v, want %v", info.EnvVars, want)
+	}
+	for i := range want {
+		if info.EnvVars[i] != want[i] {
+			t.Fatalf("EnvVars = %v, want %v", info.EnvVars, want)
+		}
+	}
+	if len(info.CLIPaths) != 0 {
+		t.Fatalf("CLIPaths = %v, want none", info.CLIPaths)
+	}
+}
+
+func TestDeviceFlowStrategy_LoadsStoredCredentialThenEnvironmentTokensInOrder(t *testing.T) {
+	testenv.ApplyVibeusage(t.Setenv, t.TempDir())
+	for _, envVar := range copilotTokenEnvVars {
+		t.Setenv(envVar, "")
+	}
+
+	strategy := &DeviceFlowStrategy{}
+	if strategy.IsAvailable() {
+		t.Fatal("strategy should be unavailable without credentials")
+	}
+
+	stored := &oauth.Credentials{AccessToken: "stored-token"}
+	content, err := json.Marshal(stored)
+	if err != nil {
+		t.Fatalf("Marshal stored credentials: %v", err)
+	}
+	if err := config.WriteCredential("copilot", "oauth", content); err != nil {
+		t.Fatalf("WriteCredential: %v", err)
+	}
+	got, source := strategy.loadCredentials()
+	if got == nil || got.AccessToken != "stored-token" || source != "device_flow" {
+		t.Fatalf("stored credentials = %#v from %q, want stored-token from device_flow", got, source)
+	}
+	config.DeleteCredential("copilot", "oauth")
+
+	t.Setenv("GITHUB_TOKEN", " github-token ")
+	got, source = strategy.loadCredentials()
+	if got == nil || got.AccessToken != "github-token" || source != "github_token" {
+		t.Fatalf("GITHUB_TOKEN credentials = %#v from %q, want github-token from github_token", got, source)
+	}
+
+	t.Setenv("GH_TOKEN", "gh-token")
+	got, source = strategy.loadCredentials()
+	if got == nil || got.AccessToken != "gh-token" || source != "github_token" {
+		t.Fatalf("GH_TOKEN credentials = %#v from %q, want gh-token from github_token", got, source)
+	}
+
+	t.Setenv("COPILOT_GITHUB_TOKEN", "copilot-token")
+	got, source = strategy.loadCredentials()
+	if got == nil || got.AccessToken != "copilot-token" || source != "github_token" {
+		t.Fatalf("COPILOT_GITHUB_TOKEN credentials = %#v from %q, want copilot-token from github_token", got, source)
+	}
+}
+
+func TestFetch_UsesEnvironmentTokenAndLabelsSnapshot(t *testing.T) {
+	testenv.ApplyVibeusage(t.Setenv, t.TempDir())
+	for _, envVar := range copilotTokenEnvVars {
+		t.Setenv(envVar, "")
+	}
+	t.Setenv("GITHUB_TOKEN", "github-token")
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Authorization"); got != "Bearer github-token" {
+			t.Errorf("Authorization = %q, want Bearer github-token", got)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"copilot_plan":"pro","quota_snapshots":{"chat":{"entitlement":100,"remaining":50}}}`))
+	}))
+	defer server.Close()
+
+	oldUsageURL := copilotUsageURL
+	copilotUsageURL = server.URL
+	t.Cleanup(func() { copilotUsageURL = oldUsageURL })
+
+	result, err := (&DeviceFlowStrategy{HTTPTimeout: 1}).Fetch(context.Background())
+	if err != nil {
+		t.Fatalf("Fetch: %v", err)
+	}
+	if !result.Success || result.Snapshot == nil {
+		t.Fatalf("Fetch result = %#v, want successful snapshot", result)
+	}
+	if result.Snapshot.Source != "github_token" {
+		t.Errorf("snapshot source = %q, want github_token", result.Snapshot.Source)
+	}
+}
 
 func TestParseTypedUsageResponse_FullResponse(t *testing.T) {
 	resp := UserResponse{

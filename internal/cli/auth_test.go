@@ -144,7 +144,6 @@ func TestAuthCursor_UsesInputWithValidation(t *testing.T) {
 
 	tmpDir := t.TempDir()
 	testenv.ApplySameDir(t.Setenv, tmpDir)
-	t.Setenv("CURSOR_API_KEY", "")
 	config.Override(t, config.DefaultConfig())
 
 	var buf bytes.Buffer
@@ -376,9 +375,9 @@ func TestAuthSetup_DisablesAndReenablesExternalCredentials(t *testing.T) {
 	t.Setenv("HOME", tmpDir)
 	t.Setenv("USERPROFILE", tmpDir)
 	for _, envVar := range []string{
-		"ANTIGRAVITY_API_KEY", "ANTHROPIC_API_KEY", "OPENAI_API_KEY",
-		"GEMINI_API_KEY", "GITHUB_TOKEN", "CURSOR_API_KEY",
-		"KIMI_CODE_API_KEY", "MINIMAX_API_KEY", "ZAI_API_KEY",
+		"ANTHROPIC_API_KEY", "COPILOT_GITHUB_TOKEN", "GEMINI_API_KEY",
+		"GH_TOKEN", "GITHUB_TOKEN", "KIMI_CODE_API_KEY",
+		"MINIMAX_API_KEY", "ZAI_API_KEY",
 	} {
 		t.Setenv(envVar, "")
 	}
@@ -462,7 +461,6 @@ func TestAuthSetup_FailedAuthKeepsProviderDisabled(t *testing.T) {
 	tmpDir := t.TempDir()
 	testenv.ApplySameDir(t.Setenv, tmpDir)
 	t.Setenv("HOME", tmpDir)
-	t.Setenv("CURSOR_API_KEY", "")
 
 	cfg := config.DefaultConfig()
 	disabled := false
@@ -596,7 +594,6 @@ func TestAuthDelete_UserDeclinesConfirm(t *testing.T) {
 func TestAuthSetCredential_SavesCredentialAndEnables(t *testing.T) {
 	tmpDir := t.TempDir()
 	testenv.ApplySameDir(t.Setenv, tmpDir)
-	t.Setenv("CURSOR_API_KEY", "")
 	cfg := config.DefaultConfig()
 	disabled := false
 	cfg.Providers["cursor"] = config.ProviderConfig{Enabled: &disabled}

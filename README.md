@@ -289,7 +289,7 @@ The API key path reports rate-limit-based usage (requests per minute/day) rather
 
 [github.com/features/copilot](https://github.com/features/copilot) — GitHub's AI pair programmer. Reports monthly usage across premium interactions, chat, and completions quotas. [Smart routing](#smart-routing) takes into account the multiplier Copilot applies to model requests when considering the Copilot provider.
 
-vibeusage reuses existing Copilot credentials from `~/.config/github-copilot/hosts.json` when available. If you don't have those, authenticate via device flow:
+vibeusage uses credentials saved by its device flow when present. Otherwise, it checks `COPILOT_GITHUB_TOKEN`, `GH_TOKEN`, and `GITHUB_TOKEN`, in that order, for a GitHub user token with Copilot access. If none is set, authenticate via device flow:
 
 ```bash
 vibeusage auth copilot
@@ -445,11 +445,12 @@ vibeusage route --role coding
 | Variable | Description |
 |----------|-------------|
 | `AMP_API_KEY` | Amp API key |
+| `COPILOT_GITHUB_TOKEN` | Preferred GitHub user token for Copilot |
 | `GEMINI_API_KEY` | Gemini API key |
-| `GITHUB_TOKEN` | GitHub token for Copilot |
+| `GH_TOKEN` | GitHub user token fallback for Copilot |
+| `GITHUB_TOKEN` | GitHub user token fallback for Copilot |
 | `KIMI_CODE_API_KEY` | Kimi API key |
 | `MINIMAX_API_KEY` | Minimax Coding Plan API key |
-| `OPENAI_API_KEY` | OpenAI API key |
 | `OPENCODE_WORKSPACE_ID` | OpenCode workspace override |
 | `OPENROUTER_API_KEY` | OpenRouter API key |
 | `VIBEUSAGE_CACHE_DIR` | Override cache directory |

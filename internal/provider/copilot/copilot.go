@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"sort"
 	"strings"
 	"time"
@@ -30,11 +31,10 @@ func (c Copilot) Meta() provider.Metadata {
 	}
 }
 
+var copilotTokenEnvVars = []string{"COPILOT_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN"}
+
 func (c Copilot) CredentialSources() provider.CredentialInfo {
-	return provider.CredentialInfo{
-		CLIPaths: []string{"~/.config/github-copilot/hosts.json"},
-		EnvVars:  []string{"GITHUB_TOKEN"},
-	}
+	return provider.CredentialInfo{EnvVars: copilotTokenEnvVars}
 }
 
 func (c Copilot) FetchStrategies() []fetch.Strategy {
@@ -87,16 +87,19 @@ const (
 	clientID      = "Iv1.b507a08c87ecfe98" // VS Code Copilot OAuth app client ID
 )
 
+var copilotUsageURL = usageURL
+
 type DeviceFlowStrategy struct {
 	HTTPTimeout float64
 }
 
 func (s *DeviceFlowStrategy) IsAvailable() bool {
-	return config.HasCredential("copilot", "oauth")
+	creds, _ := s.loadCredentials()
+	return creds != nil
 }
 
 func (s *DeviceFlowStrategy) Fetch(ctx context.Context) (fetch.FetchResult, error) {
-	creds := s.loadCredentials()
+	creds, snapshotSource := s.loadCredentials()
 	if creds == nil {
 		return fetch.ResultFail("No OAuth credentials found. Run `vibeusage auth copilot` to authenticate."), nil
 	}
@@ -116,7 +119,7 @@ func (s *DeviceFlowStrategy) Fetch(ctx context.Context) (fetch.FetchResult, erro
 
 	client := httpclient.NewFromConfig(s.HTTPTimeout)
 	var userResp UserResponse
-	resp, err := client.GetJSONCtx(ctx, usageURL, &userResp,
+	resp, err := client.GetJSONCtx(ctx, copilotUsageURL, &userResp,
 		httpclient.WithBearer(creds.AccessToken),
 		httpclient.WithHeader("Accept", "application/json"),
 	)
@@ -125,11 +128,11 @@ func (s *DeviceFlowStrategy) Fetch(ctx context.Context) (fetch.FetchResult, erro
 	}
 
 	if resp.StatusCode == 401 {
-		// If we have a refresh token, try once more before giving up
+		// If we have a refresh token, try once more before giving up.
 		if creds.RefreshToken != "" {
 			refreshed := s.refreshToken(ctx, creds)
 			if refreshed != nil {
-				resp, err = client.GetJSONCtx(ctx, usageURL, &userResp,
+				resp, err = client.GetJSONCtx(ctx, copilotUsageURL, &userResp,
 					httpclient.WithBearer(refreshed.AccessToken),
 					httpclient.WithHeader("Accept", "application/json"),
 				)
@@ -141,7 +144,7 @@ func (s *DeviceFlowStrategy) Fetch(ctx context.Context) (fetch.FetchResult, erro
 				}
 			}
 		}
-		return fetch.ResultFatal("OAuth token expired. Run `vibeusage auth copilot` to re-authenticate."), nil
+		return fetch.ResultFatal("GitHub token expired or invalid. Check your token or run `vibeusage auth copilot` to re-authenticate."), nil
 	}
 	if resp.StatusCode == 403 {
 		return fetch.ResultFail("Not authorized. Account may not have Copilot subscription."), nil
@@ -160,23 +163,26 @@ func (s *DeviceFlowStrategy) Fetch(ctx context.Context) (fetch.FetchResult, erro
 	if snapshot == nil {
 		return fetch.ResultFail("Failed to parse Copilot usage response"), nil
 	}
+	snapshot.Source = snapshotSource
 
 	return fetch.ResultOK(*snapshot), nil
 }
 
-func (s *DeviceFlowStrategy) loadCredentials() *oauth.Credentials {
+func (s *DeviceFlowStrategy) loadCredentials() (*oauth.Credentials, string) {
 	data, err := config.ReadCredential("copilot", "oauth")
-	if err != nil || data == nil {
-		return nil
+	if err == nil && data != nil {
+		var creds oauth.Credentials
+		if json.Unmarshal(data, &creds) == nil && creds.AccessToken != "" {
+			return &creds, "device_flow"
+		}
 	}
-	var creds oauth.Credentials
-	if err := json.Unmarshal(data, &creds); err != nil {
-		return nil
+
+	for _, envVar := range copilotTokenEnvVars {
+		if token := strings.TrimSpace(os.Getenv(envVar)); token != "" {
+			return &oauth.Credentials{AccessToken: token}, "github_token"
+		}
 	}
-	if creds.AccessToken == "" {
-		return nil
-	}
-	return &creds
+	return nil, ""
 }
 
 func (s *DeviceFlowStrategy) refreshToken(ctx context.Context, creds *oauth.Credentials) *oauth.Credentials {

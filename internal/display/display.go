@@ -508,6 +508,8 @@ func formatSourceName(source string) string {
 		return "API Key"
 	case "device_flow":
 		return "Device Flow"
+	case "github_token":
+		return "GitHub Token"
 	case "provider_cli":
 		return "CLI"
 	default:

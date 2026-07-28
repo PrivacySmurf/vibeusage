@@ -38,9 +38,9 @@ func setupTempDirWithCredentialIsolation(t *testing.T) string {
 
 	// Clear common provider env vars so env-based detection doesn't fire
 	for _, envVar := range []string{
-		"ANTIGRAVITY_API_KEY", "ANTHROPIC_API_KEY", "OPENAI_API_KEY",
-		"GEMINI_API_KEY", "GITHUB_TOKEN", "CURSOR_API_KEY",
-		"KIMI_CODE_API_KEY", "MINIMAX_API_KEY", "ZAI_API_KEY",
+		"ANTHROPIC_API_KEY", "COPILOT_GITHUB_TOKEN", "GEMINI_API_KEY",
+		"GH_TOKEN", "GITHUB_TOKEN", "KIMI_CODE_API_KEY",
+		"MINIMAX_API_KEY", "ZAI_API_KEY",
 	} {
 		t.Setenv(envVar, "")
 	}
@@ -1464,6 +1464,16 @@ func TestFindProviderCredential_EnvVar(t *testing.T) {
 	}
 	if path != "" {
 		t.Errorf("path = %q, want empty for env source", path)
+	}
+}
+
+func TestFindProviderCredential_IgnoresWhitespaceEnvVar(t *testing.T) {
+	setupTempDirWithCredentialIsolation(t)
+	t.Setenv("ANTHROPIC_API_KEY", " \t\n ")
+
+	found, source, path := FindProviderCredential("claude", nil, []string{"ANTHROPIC_API_KEY"})
+	if found || source != "" || path != "" {
+		t.Fatalf("FindProviderCredential() = (%v, %q, %q), want no credential", found, source, path)
 	}
 }
 

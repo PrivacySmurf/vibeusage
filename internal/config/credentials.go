@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 )
 
@@ -126,7 +127,7 @@ func FindProviderCredential(providerID string, cliPaths []string, envVars []stri
 
 	// Check environment variables
 	for _, envVar := range envVars {
-		if os.Getenv(envVar) != "" {
+		if strings.TrimSpace(os.Getenv(envVar)) != "" {
 			return true, "env", ""
 		}
 	}

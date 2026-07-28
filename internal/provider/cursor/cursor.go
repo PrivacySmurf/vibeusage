@@ -28,9 +28,7 @@ func (c Cursor) Meta() provider.Metadata {
 }
 
 func (c Cursor) CredentialSources() provider.CredentialInfo {
-	return provider.CredentialInfo{
-		EnvVars: []string{"CURSOR_API_KEY"},
-	}
+	return provider.CredentialInfo{}
 }
 
 func (c Cursor) FetchStrategies() []fetch.Strategy {

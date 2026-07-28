@@ -1288,6 +1288,7 @@ func TestFormatSourceName(t *testing.T) {
 		{"web", "Web Session"},
 		{"api_key", "API Key"},
 		{"device_flow", "Device Flow"},
+		{"github_token", "GitHub Token"},
 		{"provider_cli", "CLI"},
 		{"unknown", "unknown"},
 	}
