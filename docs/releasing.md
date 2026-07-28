@@ -30,17 +30,20 @@ A `release` GitHub environment with the following secrets:
 ## How to cut a release
 
 1. Ensure CI is green on `main`.
-2. Tag the commit:
+2. If CLI display output or `cmd/vibeshots/` mock data changed since the
+   README images were last regenerated, refresh them first with
+   `just screenshots` (requires `freeze`, installed via mise).
+3. Tag the commit:
 
 ```bash
 git tag v0.1.0
 git push origin v0.1.0
 ```
 
-3. The `release` workflow runs race-enabled tests on Linux, macOS, and Windows.
-4. The release job runs `go vet` and a module-tidiness check.
-5. GoReleaser creates the GitHub Release and updates the Homebrew formula.
-6. GitHub signs and stores provenance attestations for the release artifacts.
+4. The `release` workflow runs race-enabled tests on Linux, macOS, and Windows.
+5. The release job runs `go vet` and a module-tidiness check.
+6. GoReleaser creates the GitHub Release and updates the Homebrew formula.
+7. GitHub signs and stores provenance attestations for the release artifacts.
 
 ## Recovery
 
