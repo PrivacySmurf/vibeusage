@@ -36,7 +36,7 @@ brew install vibeusage
 If you have [Go](https://go.dev/) available, you can also use:
 
 ```bash
-go install github.com/joshuadavidthomas/vibeusage@latest
+go install github.com/joshuadavidthomas/vibeusage/cmd/vibeusage@latest
 ```
 
 Or install from source:
@@ -414,7 +414,6 @@ Configuration is stored in:
 use_keyring = false                # Use system keyring
 
 [display]
-pace_colors = true                 # Use pace-based coloring
 reset_format = "countdown"         # "countdown" or "absolute"
 show_remaining = true              # Show remaining % instead of used %
 
@@ -448,7 +447,6 @@ vibeusage route --role coding
 | `AMP_API_KEY` | Amp API key |
 | `GEMINI_API_KEY` | Gemini API key |
 | `GITHUB_TOKEN` | GitHub token for Copilot |
-| `KIMI_API_KEY` | Kimi API key fallback |
 | `KIMI_CODE_API_KEY` | Kimi API key |
 | `MINIMAX_API_KEY` | Minimax Coding Plan API key |
 | `OPENAI_API_KEY` | OpenAI API key |
@@ -523,7 +521,7 @@ brew upgrade vibeusage
 If you installed with `go install`, rerun:
 
 ```bash
-go install github.com/joshuadavidthomas/vibeusage@latest
+go install github.com/joshuadavidthomas/vibeusage/cmd/vibeusage@latest
 ```
 
 ## Development
