@@ -135,6 +135,15 @@ func LookupMultiplier(providerID string, modelName string) *float64 {
 		}
 	}
 
+	if providerID == opencodeMultiplierProvider {
+		baseKey := normalizeName(stripTrailingParenthetical(modelName))
+		for name, multiplier := range providerMultipliers {
+			if normalizeName(name) == baseKey {
+				return &multiplier
+			}
+		}
+	}
+
 	return nil
 }
 

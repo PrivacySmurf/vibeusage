@@ -5,12 +5,16 @@ on:
     branches: [main]
     paths:
       - "**/*.go"
+      - .goreleaser.yml
+      - .github/workflows/release.yml
       - .github/workflows/test.yml
       - go.mod
       - go.sum
   pull_request:
     paths:
       - "**/*.go"
+      - .goreleaser.yml
+      - .github/workflows/release.yml
       - .github/workflows/test.yml
       - go.mod
       - go.sum
@@ -24,7 +28,11 @@ concurrency:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

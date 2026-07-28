@@ -7,7 +7,9 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -58,8 +60,10 @@ func TestAppendCreatesPrivateHistoryFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("stating history file: %v", err)
 	}
-	if got, want := info.Mode().Perm(), os.FileMode(0o600); got != want {
-		t.Errorf("history file mode = %o, want %o", got, want)
+	if runtime.GOOS != "windows" {
+		if got, want := info.Mode().Perm(), os.FileMode(0o600); got != want {
+			t.Errorf("history file mode = %o, want %o", got, want)
+		}
 	}
 	if got, want := filepath.Dir(historyPath("claude")), config.HistoryDir(); got != want {
 		t.Errorf("history directory = %q, want %q", got, want)
@@ -158,6 +162,39 @@ func TestAppendDeduplicatesRecentHistory(t *testing.T) {
 	}
 }
 
+func TestAppendDeduplicatesConcurrentHistory(t *testing.T) {
+	t.Setenv("VIBEUSAGE_DATA_DIR", t.TempDir())
+
+	const writers = 64
+	start := make(chan struct{})
+	errs := make(chan error, writers)
+	var wg sync.WaitGroup
+	for range writers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			errs <- Append("claude", testSnapshot("claude", "same-sample", time.Now()))
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Errorf("concurrent Append() error: %v", err)
+		}
+	}
+
+	records, err := Read("claude")
+	if err != nil {
+		t.Fatalf("reading concurrent history: %v", err)
+	}
+	if got, want := len(records), 1; got != want {
+		t.Fatalf("record count after concurrent duplicate appends = %d, want %d", got, want)
+	}
+}
+
 func TestAppendCompactsExpiredRecords(t *testing.T) {
 	t.Setenv("VIBEUSAGE_DATA_DIR", t.TempDir())
 
@@ -244,8 +281,10 @@ func TestAppendCompactionPreservesPrivateMode(t *testing.T) {
 	if err != nil {
 		t.Fatalf("stating compacted history: %v", err)
 	}
-	if got, want := info.Mode().Perm(), os.FileMode(0o600); got != want {
-		t.Errorf("history file mode = %o, want %o", got, want)
+	if runtime.GOOS != "windows" {
+		if got, want := info.Mode().Perm(), os.FileMode(0o600); got != want {
+			t.Errorf("history file mode = %o, want %o", got, want)
+		}
 	}
 	data, err := os.ReadFile(historyPath("claude"))
 	if err != nil {
@@ -253,6 +292,103 @@ func TestAppendCompactionPreservesPrivateMode(t *testing.T) {
 	}
 	if bytes.Contains(data, []byte("not json")) {
 		t.Error("stale-file compaction did not discard malformed line")
+	}
+}
+
+func TestReadWaitsForActiveAppendLock(t *testing.T) {
+	t.Setenv("VIBEUSAGE_DATA_DIR", t.TempDir())
+	writeRecords(t, "claude", Record{
+		V:        CurrentRecordVersion,
+		Snapshot: testSnapshot("claude", "daily", time.Now()),
+	})
+
+	locked := make(chan struct{})
+	release := make(chan struct{})
+	holderDone := make(chan error, 1)
+	go func() {
+		holderDone <- withHistoryLock("claude", func() error {
+			close(locked)
+			<-release
+			return nil
+		})
+	}()
+	<-locked
+
+	readStarted := make(chan struct{})
+	readDone := make(chan error, 1)
+	go func() {
+		close(readStarted)
+		_, err := Read("claude")
+		readDone <- err
+	}()
+	<-readStarted
+
+	returnedWhileLocked := false
+	select {
+	case <-readDone:
+		returnedWhileLocked = true
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(release)
+	if err := <-holderDone; err != nil {
+		t.Fatalf("holding history lock: %v", err)
+	}
+	if !returnedWhileLocked {
+		if err := <-readDone; err != nil {
+			t.Fatalf("Read() error: %v", err)
+		}
+	}
+	if returnedWhileLocked {
+		t.Error("Read() returned while an append lock was active")
+	}
+}
+
+func TestClearWaitsForActiveAppendLock(t *testing.T) {
+	for _, providerID := range []string{"claude", ""} {
+		name := providerID
+		if name == "" {
+			name = "all"
+		}
+		t.Run(name, func(t *testing.T) {
+			t.Setenv("VIBEUSAGE_DATA_DIR", t.TempDir())
+			if err := os.MkdirAll(config.HistoryDir(), 0o755); err != nil {
+				t.Fatalf("creating history directory: %v", err)
+			}
+
+			locked := make(chan struct{})
+			release := make(chan struct{})
+			holderDone := make(chan error, 1)
+			go func() {
+				holderDone <- withHistoryLock("claude", func() error {
+					close(locked)
+					<-release
+					return nil
+				})
+			}()
+			<-locked
+
+			clearDone := make(chan error, 1)
+			go func() { clearDone <- Clear(providerID) }()
+
+			returnedWhileLocked := false
+			select {
+			case <-clearDone:
+				returnedWhileLocked = true
+			case <-time.After(50 * time.Millisecond):
+			}
+			close(release)
+			if err := <-holderDone; err != nil {
+				t.Fatalf("holding history lock: %v", err)
+			}
+			if !returnedWhileLocked {
+				if err := <-clearDone; err != nil {
+					t.Fatalf("Clear() error: %v", err)
+				}
+			}
+			if returnedWhileLocked {
+				t.Error("Clear() returned while an append lock was active")
+			}
+		})
 	}
 }
 

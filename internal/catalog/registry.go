@@ -97,8 +97,13 @@ func buildRegistry(data map[string]modelsDevProvider) (models map[string]ModelIn
 			}
 
 			nameKey := normalizeName(m.Name)
-			canonicalID, exists := nameToID[nameKey]
+			canonicalID := m.ID
+			_, exists := models[canonicalID]
+			if !exists {
+				canonicalID, exists = nameToID[nameKey]
+			}
 			if exists {
+				nameToID[nameKey] = canonicalID
 				// Model already registered — add our providers and alias this ID.
 				info := models[canonicalID]
 				for _, pid := range ourIDs {

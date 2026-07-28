@@ -116,6 +116,17 @@ func historyRecordResult(outcomes map[string]fetch.FetchOutcome, attempted int) 
 		return fmt.Errorf("history record: no enabled providers are authenticated. Run `vibeusage auth` to enable a provider")
 	}
 
+	recordingFailures := make([]string, 0)
+	for providerID, outcome := range outcomes {
+		if outcome.RecordingError != "" {
+			recordingFailures = append(recordingFailures, providerID+": "+outcome.RecordingError)
+		}
+	}
+	if len(recordingFailures) > 0 {
+		sort.Strings(recordingFailures)
+		return fmt.Errorf("history record: recording failed: %s", strings.Join(recordingFailures, "; "))
+	}
+
 	for _, outcome := range outcomes {
 		if outcome.Success && outcome.Snapshot != nil {
 			return nil

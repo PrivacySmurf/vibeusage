@@ -115,6 +115,19 @@ func TestHistoryRecordResult(t *testing.T) {
 			attempted: 2,
 		},
 		{
+			name: "recording failure",
+			outcomes: map[string]fetch.FetchOutcome{
+				"claude": {
+					Success:        true,
+					Snapshot:       &models.UsageSnapshot{},
+					RecordingError: "history write failed",
+				},
+				"codex": {Success: true, Snapshot: &models.UsageSnapshot{}},
+			},
+			attempted: 2,
+			wantErr:   "history record: recording failed: claude: history write failed",
+		},
+		{
 			name: "all attempted providers fail",
 			outcomes: map[string]fetch.FetchOutcome{
 				"claude": {Success: false, Error: "request failed"},

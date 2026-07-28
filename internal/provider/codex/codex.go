@@ -36,7 +36,8 @@ func (c Codex) Meta() provider.Metadata {
 
 func (c Codex) CredentialSources() provider.CredentialInfo {
 	return provider.CredentialInfo{
-		CLIPaths: []string{"~/.codex/auth.json"},
+		CLIPaths:      []string{"~/.codex/auth.json"},
+		CheckStrategy: true,
 	}
 }
 

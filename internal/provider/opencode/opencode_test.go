@@ -14,6 +14,7 @@ import (
 	"github.com/joshuadavidthomas/vibeusage/internal/fetch"
 	"github.com/joshuadavidthomas/vibeusage/internal/httpclient"
 	"github.com/joshuadavidthomas/vibeusage/internal/models"
+	"github.com/joshuadavidthomas/vibeusage/internal/provider"
 	"github.com/joshuadavidthomas/vibeusage/internal/testenv"
 )
 
@@ -85,12 +86,22 @@ func TestWebStrategy_IsAvailable_WithCredential(t *testing.T) {
 	}
 }
 
-func TestWebStrategy_IsAvailable_ReadError(t *testing.T) {
+func TestWebStrategy_IsAvailable_ReadErrorRemainsAttemptable(t *testing.T) {
 	isolateOpenCodeTest(t)
 	makeCredentialsFileDirectory(t)
 
-	if (&WebStrategy{}).IsAvailable() {
-		t.Error("expected IsAvailable to be false after credential read error")
+	if !(&WebStrategy{}).IsAvailable() {
+		t.Error("expected credential read error to reach Fetch for cache fallback")
+	}
+}
+
+func TestCredentialReadErrorDoesNotReportAuthenticated(t *testing.T) {
+	isolateOpenCodeTest(t)
+	makeCredentialsFileDirectory(t)
+
+	hasCredentials, source := provider.CheckCredentials("opencode")
+	if hasCredentials || source != "" {
+		t.Errorf("CheckCredentials() = (%t, %q), want unauthenticated", hasCredentials, source)
 	}
 }
 
@@ -168,6 +179,31 @@ func TestFetch_ReadErrorAllowsCacheFallback(t *testing.T) {
 	}
 	if !strings.Contains(result.Error, "reading OpenCode session credential") {
 		t.Errorf("error = %q, want credential read context", result.Error)
+	}
+}
+
+func TestFetch_CredentialReadErrorFallsBackToPipelineCache(t *testing.T) {
+	isolateOpenCodeTest(t)
+	cached := models.UsageSnapshot{
+		Provider:  "opencode",
+		FetchedAt: time.Now().Add(-time.Hour),
+		Periods:   []models.UsagePeriod{{Name: "Monthly", Utilization: 37}},
+	}
+	if err := config.CacheSnapshot(cached); err != nil {
+		t.Fatalf("cache snapshot: %v", err)
+	}
+	makeCredentialsFileDirectory(t)
+
+	outcome := fetch.ExecutePipeline(context.Background(), "opencode", []fetch.Strategy{&WebStrategy{}}, true, fetch.PipelineConfig{
+		Timeout: time.Second,
+		Cache:   config.FileCache{},
+	})
+
+	if !outcome.Success || !outcome.Cached || outcome.Source != "cache" {
+		t.Fatalf("outcome = %+v, want cached success", outcome)
+	}
+	if outcome.Snapshot == nil || outcome.Snapshot.Periods[0].Utilization != 37 {
+		t.Errorf("snapshot = %+v, want cached OpenCode usage", outcome.Snapshot)
 	}
 }
 

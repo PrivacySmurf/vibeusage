@@ -25,6 +25,9 @@ type CredentialInfo struct {
 	CLIPaths []string
 	// EnvVars are environment variable names (e.g. ANTHROPIC_API_KEY).
 	EnvVars []string
+	// CheckStrategy enables credential discovery performed inside a fetch strategy,
+	// such as an OS keychain lookup that has no stable filesystem path.
+	CheckStrategy bool
 }
 
 type Provider interface {

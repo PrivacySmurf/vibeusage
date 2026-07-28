@@ -26,7 +26,8 @@ func (c Claude) Meta() provider.Metadata {
 
 func (c Claude) CredentialSources() provider.CredentialInfo {
 	return provider.CredentialInfo{
-		CLIPaths: []string{"~/.claude/.credentials.json"},
+		CLIPaths:      []string{"~/.claude/.credentials.json"},
+		CheckStrategy: true,
 	}
 }
 

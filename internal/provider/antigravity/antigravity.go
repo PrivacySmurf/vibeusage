@@ -34,7 +34,8 @@ func (a Antigravity) Meta() provider.Metadata {
 
 func (a Antigravity) CredentialSources() provider.CredentialInfo {
 	return provider.CredentialInfo{
-		CLIPaths: []string{"~/.config/Antigravity/credentials.json"},
+		CLIPaths:      []string{"~/.config/Antigravity/credentials.json"},
+		CheckStrategy: true,
 	}
 }
 

@@ -96,12 +96,13 @@ func ResultThrottled(err string, retryAfter time.Time) FetchResult {
 
 // FetchOutcome is the complete result of fetching from a provider.
 type FetchOutcome struct {
-	ProviderID string                `json:"provider_id"`
-	Success    bool                  `json:"success"`
-	Snapshot   *models.UsageSnapshot `json:"snapshot,omitempty"`
-	Source     string                `json:"source,omitempty"`
-	Error      string                `json:"error,omitempty"`
-	Cached     bool                  `json:"cached"`
+	ProviderID     string                `json:"provider_id"`
+	Success        bool                  `json:"success"`
+	Snapshot       *models.UsageSnapshot `json:"snapshot,omitempty"`
+	Source         string                `json:"source,omitempty"`
+	Error          string                `json:"error,omitempty"`
+	RecordingError string                `json:"-"`
+	Cached         bool                  `json:"cached"`
 }
 
 // Strategy is the interface all fetch strategies must implement.

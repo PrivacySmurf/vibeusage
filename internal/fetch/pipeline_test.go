@@ -133,6 +133,17 @@ func (t *memThrottles) Clear(providerID string) error {
 	return nil
 }
 
+type cancelOnLoadThrottles struct {
+	*memThrottles
+	cancel context.CancelFunc
+}
+
+func (t *cancelOnLoadThrottles) Load(providerID string) (*ThrottleMarker, error) {
+	marker, err := t.memThrottles.Load(providerID)
+	t.cancel()
+	return marker, err
+}
+
 func defaultTestPipelineCfg() PipelineConfig {
 	return PipelineConfig{
 		Timeout: 30 * time.Second,
@@ -254,9 +265,7 @@ func TestExecutePipeline_CancelledDuringLoopRejectsFallbackCache(t *testing.T) {
 	}
 }
 
-// cancelOnLoadCache cancels the context while the fallback cache is being
-// loaded, simulating cancellation that arrives after the strategy loop
-// finishes but before the cached snapshot is served.
+// cancelOnLoadCache cancels the context while a cached snapshot is loaded.
 type cancelOnLoadCache struct {
 	*memCache
 	cancel context.CancelFunc
@@ -265,6 +274,105 @@ type cancelOnLoadCache struct {
 func (c *cancelOnLoadCache) Load(providerID string) (*models.UsageSnapshot, error) {
 	c.cancel()
 	return c.memCache.Load(providerID)
+}
+
+func TestExecutePipeline_CancelledDuringThrottleLoad(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	throttles := newMemThrottles()
+	throttles.data["test-provider"] = ThrottleMarker{
+		RetryAt: time.Now().Add(time.Hour),
+		Reason:  "Rate limited",
+	}
+	strategy := &mockStrategy{
+		available: true,
+		fetchFn: func(context.Context) (FetchResult, error) {
+			t.Fatal("strategy should not run while throttled")
+			return FetchResult{}, nil
+		},
+	}
+
+	outcome := ExecutePipeline(ctx, "test-provider", []Strategy{strategy}, true, PipelineConfig{
+		Timeout:   time.Second,
+		Throttles: &cancelOnLoadThrottles{memThrottles: throttles, cancel: cancel},
+	})
+
+	if outcome.Success || outcome.Error != "Context cancelled" {
+		t.Errorf("outcome = %+v, want cancelled failure", outcome)
+	}
+}
+
+func TestExecutePipeline_CancelledDuringThrottledCacheLoad(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	throttles := newMemThrottles()
+	throttles.data["test-provider"] = ThrottleMarker{RetryAt: time.Now().Add(time.Hour)}
+	cache := newMemCache()
+	cache.data["test-provider"] = testSnapshot("test-provider", "cached", 30)
+	strategy := &mockStrategy{
+		available: true,
+		fetchFn: func(context.Context) (FetchResult, error) {
+			t.Fatal("strategy should not run while throttled")
+			return FetchResult{}, nil
+		},
+	}
+
+	outcome := ExecutePipeline(ctx, "test-provider", []Strategy{strategy}, true, PipelineConfig{
+		Timeout:   time.Second,
+		Cache:     &cancelOnLoadCache{memCache: cache, cancel: cancel},
+		Throttles: throttles,
+	})
+
+	if outcome.Success || outcome.Cached || outcome.Error != "Context cancelled" {
+		t.Errorf("outcome = %+v, want cancelled failure", outcome)
+	}
+}
+
+func TestExecutePipeline_CancelledDuringFreshCacheLoad(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	cache := newMemCache()
+	cache.data["test-provider"] = testSnapshot("test-provider", "cached", 30)
+	strategy := &mockStrategy{
+		available: true,
+		fetchFn: func(context.Context) (FetchResult, error) {
+			t.Fatal("strategy should not run when the fresh cache satisfies the request")
+			return FetchResult{}, nil
+		},
+	}
+
+	outcome := ExecutePipeline(ctx, "test-provider", []Strategy{strategy}, true, PipelineConfig{
+		Timeout:       time.Second,
+		Cache:         &cancelOnLoadCache{memCache: cache, cancel: cancel},
+		FreshCacheTTL: time.Minute,
+	})
+
+	if outcome.Success || outcome.Cached || outcome.Error != "Context cancelled" {
+		t.Errorf("outcome = %+v, want cancelled failure", outcome)
+	}
+}
+
+func TestExecutePipeline_CancelledDuringEmptyFallbackCacheLoad(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	strategy := &mockStrategy{
+		available: true,
+		fetchFn: func(context.Context) (FetchResult, error) {
+			return ResultFail("API error"), nil
+		},
+	}
+	outcome := ExecutePipeline(ctx, "test-provider", []Strategy{strategy}, true, PipelineConfig{
+		Timeout: time.Second,
+		Cache:   &cancelOnLoadCache{memCache: newMemCache(), cancel: cancel},
+	})
+
+	if outcome.Success || outcome.Error != "Context cancelled" {
+		t.Errorf("outcome = %+v, want cancelled failure", outcome)
+	}
 }
 
 func TestExecutePipeline_CancelledBeforeFallbackReturnRejectsCache(t *testing.T) {
@@ -466,6 +574,12 @@ func TestExecutePipeline_RecordingFailurePreservesLiveSuccess(t *testing.T) {
 
 	if !outcome.Success || outcome.Snapshot == nil {
 		t.Errorf("recording failure changed live fetch outcome: %+v", outcome)
+	}
+	if outcome.Error != "" {
+		t.Errorf("recording failure became a fetch error: %q", outcome.Error)
+	}
+	if outcome.RecordingError != "history write failed" {
+		t.Errorf("recording error = %q, want %q", outcome.RecordingError, "history write failed")
 	}
 }
 

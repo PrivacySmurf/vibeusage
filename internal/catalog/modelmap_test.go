@@ -206,6 +206,53 @@ func TestProvidersForModel(t *testing.T) {
 	}
 }
 
+func TestBuildRegistryMergesSameIDWithDifferentNames(t *testing.T) {
+	data := map[string]modelsDevProvider{
+		"moonshotai": {Models: map[string]modelsDevModel{
+			"kimi-k3": {ID: "kimi-k3", Name: "Kimi K3", Family: "kimi"},
+		}},
+		"opencode-go": {Models: map[string]modelsDevModel{
+			"kimi-k3": {ID: "kimi-k3", Name: "Kimi K3 (2x usage)", Family: "kimi"},
+		}},
+	}
+
+	models, _ := buildRegistry(data)
+	if len(models) != 1 {
+		t.Fatalf("models = %#v, want one merged model", models)
+	}
+	info := models["kimi-k3"]
+	for _, providerID := range []string{"kimicode", "opencode"} {
+		if !containsStr(info.Providers, providerID) {
+			t.Errorf("providers = %v, missing %q", info.Providers, providerID)
+		}
+	}
+	if info.Name != "Kimi K3" {
+		t.Errorf("Name = %q, want origin-provider name %q", info.Name, "Kimi K3")
+	}
+}
+
+func TestBuildRegistryPrefersSameIDOverNameCollision(t *testing.T) {
+	data := map[string]modelsDevProvider{
+		"openai": {Models: map[string]modelsDevModel{
+			"other-model": {ID: "other-model", Name: "Kimi K3 (2x usage)", Family: "other"},
+		}},
+		"moonshotai": {Models: map[string]modelsDevModel{
+			"kimi-k3": {ID: "kimi-k3", Name: "Kimi K3", Family: "kimi"},
+		}},
+		"opencode-go": {Models: map[string]modelsDevModel{
+			"kimi-k3": {ID: "kimi-k3", Name: "Kimi K3 (2x usage)", Family: "kimi"},
+		}},
+	}
+
+	models, _ := buildRegistry(data)
+	if !containsStr(models["kimi-k3"].Providers, "opencode") {
+		t.Errorf("kimi-k3 providers = %v, want opencode merged by exact ID", models["kimi-k3"].Providers)
+	}
+	if containsStr(models["other-model"].Providers, "opencode") {
+		t.Errorf("other-model providers = %v, opencode merged by colliding name", models["other-model"].Providers)
+	}
+}
+
 func TestProvidersForModel_NotFound(t *testing.T) {
 	setupTest(t)
 

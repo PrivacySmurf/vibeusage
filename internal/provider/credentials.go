@@ -62,7 +62,7 @@ func CheckCredentials(providerID string) (bool, string) {
 	}
 
 	p, ok := Get(providerID)
-	if !ok {
+	if !ok || !p.CredentialSources().CheckStrategy {
 		return false, ""
 	}
 

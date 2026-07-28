@@ -165,7 +165,7 @@ enabled = false
 
 ### Scheduled collection
 
-For regular samples, schedule `vibeusage history record` yourself. The command fetches every enabled provider, records successful fetches, prints nothing on success, and returns a non-zero exit only when every authenticated provider fails. Choose the binary path for your installation; `which vibeusage` shows it.
+For regular samples, schedule `vibeusage history record` yourself. The command fetches every enabled provider, records successful fetches, prints nothing on success, and returns a non-zero exit when every authenticated provider fails or a fetched sample cannot be recorded. Choose the binary path for your installation; `which vibeusage` shows it.
 
 Cron, every 15 minutes:
 

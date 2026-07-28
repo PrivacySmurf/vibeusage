@@ -22,9 +22,26 @@ and this project attempts to adhere to [Semantic Versioning](https://semver.org/
 
 ### Added
 
+- Added local usage history, enabled by default. Successful live fetches record one sample per provider, retained for up to 90 days or 8 MiB. Set `[history] enabled = false` in `config.toml` to disable recording.
+- Added `vibeusage history [provider]` with terminal and JSON trend reports, plus `history record` for schedulers and `history clear` for deleting records. Scheduled recording stays silent on success and exits nonzero when every authenticated provider fails or a fetched sample cannot be saved.
 - Added OpenCode Go to `vibeusage route` smart routing, ranked on the rolling 5-hour, weekly, and monthly usage windows.
 - Added the monthly usage window to OpenCode usage reporting for Go subscribers.
 - `vibeusage route` now applies OpenCode Go's per-model quota costs, so lower-allowance models rank against other providers on realistic headroom.
+- Added Copilot authentication through `COPILOT_GITHUB_TOKEN`, `GH_TOKEN`, and `GITHUB_TOKEN`, in that order after saved device-flow credentials. Output labels these environment credentials as GitHub Token (`github_token` in JSON).
+
+### Fixed
+
+- Fixed canceled requests waiting for queued provider slots or returning cached usage as a successful result.
+- Made config, credential, cache snapshot, and throttle marker writes atomic, including replacement of existing files on Windows.
+- Fixed legacy credential migration hiding unreadable files and directories. It now reports the failed paths and leaves the old data for a later retry.
+- Fixed blank or unsupported credential environment variables causing providers to appear authenticated.
+- Fixed OpenCode credential-store read failures blocking cached-usage fallback.
+
+### Security
+
+- Release archives now carry GitHub build-provenance attestations. `install.sh` verifies them when an authenticated `gh` CLI is available; set `VIBEUSAGE_REQUIRE_ATTESTATION=1` to require verification.
+- Antigravity browser authentication now validates OAuth state and uses PKCE.
+- Gemini API-key validation now sends the key in the `x-goog-api-key` header instead of the request URL.
 
 ## [0.12.0]
 

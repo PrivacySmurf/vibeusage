@@ -37,6 +37,15 @@ func historyPath(providerID string) string {
 // Append records a snapshot unless the newest stored record is less than a
 // minute old. It compacts history lazily to enforce age and size limits.
 func Append(providerID string, snap models.UsageSnapshot) error {
+	return withHistoryLock(providerID, func() error {
+		if err := os.MkdirAll(config.HistoryDir(), 0o755); err != nil {
+			return fmt.Errorf("creating history directory for %s: %w", providerID, err)
+		}
+		return appendLocked(providerID, snap)
+	})
+}
+
+func appendLocked(providerID string, snap models.UsageSnapshot) error {
 	path := historyPath(providerID)
 	info, statErr := os.Stat(path)
 	if statErr != nil && !errors.Is(statErr, os.ErrNotExist) {
@@ -44,16 +53,12 @@ func Append(providerID string, snap models.UsageSnapshot) error {
 	}
 	stale := statErr == nil && time.Since(info.ModTime()) > compactionInterval
 
-	records, err := Read(providerID)
+	records, err := readUnlocked(providerID)
 	if err != nil {
 		return err
 	}
 	if len(records) > 0 && time.Since(records[len(records)-1].Snapshot.FetchedAt) < DedupFloor {
 		return nil
-	}
-
-	if err := os.MkdirAll(config.HistoryDir(), 0o755); err != nil {
-		return fmt.Errorf("creating history directory for %s: %w", providerID, err)
 	}
 
 	data, err := json.Marshal(Record{V: CurrentRecordVersion, Snapshot: snap})
@@ -96,7 +101,15 @@ func Append(providerID string, snap models.UsageSnapshot) error {
 
 // Read returns valid history records in oldest-first order. Empty and malformed
 // lines are skipped so torn or interleaved appends do not make the history unreadable.
-func Read(providerID string) ([]Record, error) {
+func Read(providerID string) (records []Record, err error) {
+	err = withHistoryReadLock(providerID, func() error {
+		records, err = readUnlocked(providerID)
+		return err
+	})
+	return records, err
+}
+
+func readUnlocked(providerID string) ([]Record, error) {
 	file, err := os.Open(historyPath(providerID))
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -130,19 +143,23 @@ func Read(providerID string) ([]Record, error) {
 // Clear removes one provider's history. An empty provider ID removes all history.
 func Clear(providerID string) error {
 	if providerID == "" {
-		if err := os.RemoveAll(config.HistoryDir()); err != nil {
-			return fmt.Errorf("clearing history: %w", err)
+		return withAllHistoryLock(func() error {
+			if err := os.RemoveAll(config.HistoryDir()); err != nil {
+				return fmt.Errorf("clearing history: %w", err)
+			}
+			return nil
+		})
+	}
+	return withHistoryLock(providerID, func() error {
+		if err := os.Remove(historyPath(providerID)); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("clearing history for %s: %w", providerID, err)
 		}
 		return nil
-	}
-	if err := os.Remove(historyPath(providerID)); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("clearing history for %s: %w", providerID, err)
-	}
-	return nil
+	})
 }
 
 func compact(providerID string) error {
-	records, err := Read(providerID)
+	records, err := readUnlocked(providerID)
 	if err != nil {
 		return err
 	}

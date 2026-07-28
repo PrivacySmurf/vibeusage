@@ -91,7 +91,7 @@ type sessionCredentials struct {
 
 func (s *WebStrategy) IsAvailable() bool {
 	data, err := config.ReadCredential("opencode", "session")
-	return err == nil && data != nil
+	return err != nil || data != nil
 }
 
 func (s *WebStrategy) loadSessionToken() (string, error) {

@@ -70,7 +70,6 @@ jobs:
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          HOMEBREW_TAP_GITHUB_TOKEN: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}
 
       - name: Preserve release artifacts for attestation
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -80,14 +79,16 @@ jobs:
             dist/*.tar.gz
             dist/*.zip
             dist/checksums.txt
+            dist/homebrew/Formula/vibeusage.rb
           if-no-files-found: error
           retention-days: 7
 
   attest:
     needs: goreleaser
     runs-on: ubuntu-latest
+    environment: release
     permissions:
-      contents: read
+      contents: write # Publish the draft after attestation.
       id-token: write # Mint the OIDC token used to sign provenance.
       attestations: write # Store artifact attestations with GitHub.
     steps:
@@ -101,3 +102,23 @@ jobs:
         uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
         with:
           subject-checksums: dist/checksums.txt
+
+      - name: Publish GitHub release
+        run: gh release edit "$GITHUB_REF_NAME" --draft=false --repo "$GITHUB_REPOSITORY"
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Publish Homebrew formula
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          endpoint="repos/joshuadavidthomas/homebrew-homebrew/contents/Formula/vibeusage.rb"
+          sha="$(gh api --method GET "$endpoint" -f ref=main --jq .sha)"
+          content="$(base64 -w 0 dist/homebrew/Formula/vibeusage.rb)"
+          gh api --method PUT "$endpoint" \
+            -f branch=main \
+            -f sha="$sha" \
+            -f message="Update vibeusage formula for ${GITHUB_REF_NAME}" \
+            -f content="$content"

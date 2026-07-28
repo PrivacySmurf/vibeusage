@@ -310,6 +310,7 @@ func TestCheckCredentials_FallsBackToAvailableStrategy(t *testing.T) {
 	Register(&stubProvider{
 		id:         "alpha",
 		strategies: []fetch.Strategy{&stubStrategy{available: true}},
+		creds:      CredentialInfo{CheckStrategy: true},
 	})
 
 	hasCreds, source := CheckCredentials("alpha")

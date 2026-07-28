@@ -29,6 +29,9 @@ func ExecutePipeline(ctx context.Context, providerID string, strategies []Strate
 	// cooldown as the error so the user sees why nothing fetched.
 	if useCache && cfg.Throttles != nil && hasAvailableStrategy(strategies) {
 		marker, err := cfg.Throttles.Load(providerID)
+		if ctx.Err() != nil {
+			return contextCancelledOutcome(providerID)
+		}
 		if err != nil {
 			logger.Warn("loading throttle marker failed", "provider", providerID, "err", err)
 			marker = nil
@@ -36,6 +39,9 @@ func ExecutePipeline(ctx context.Context, providerID string, strategies []Strate
 		if marker != nil {
 			if cfg.Cache != nil {
 				cached, err := cfg.Cache.Load(providerID)
+				if ctx.Err() != nil {
+					return contextCancelledOutcome(providerID)
+				}
 				if err != nil {
 					logger.Warn("loading cached snapshot failed", "provider", providerID, "err", err)
 					cached = nil
@@ -64,6 +70,9 @@ func ExecutePipeline(ctx context.Context, providerID string, strategies []Strate
 
 	if useCache && cfg.Cache != nil && cfg.FreshCacheTTL > 0 && hasAvailableStrategy(strategies) {
 		cached, err := cfg.Cache.Load(providerID)
+		if ctx.Err() != nil {
+			return contextCancelledOutcome(providerID)
+		}
 		if err != nil {
 			logger.Warn("loading cached snapshot failed", "provider", providerID, "err", err)
 			cached = nil
@@ -119,9 +128,11 @@ func ExecutePipeline(ctx context.Context, providerID string, strategies []Strate
 					logger.Warn("saving cached snapshot failed", "provider", providerID, "err", err)
 				}
 			}
+			recordingError := ""
 			if cfg.Recorder != nil {
 				if err := cfg.Recorder.Record(*result.Snapshot); err != nil {
 					logger.Warn("recording usage history failed", "provider", providerID, "err", err)
+					recordingError = err.Error()
 				}
 			}
 			if cfg.Throttles != nil {
@@ -131,10 +142,11 @@ func ExecutePipeline(ctx context.Context, providerID string, strategies []Strate
 			}
 
 			return FetchOutcome{
-				ProviderID: providerID,
-				Success:    true,
-				Snapshot:   result.Snapshot,
-				Source:     StrategyName(strategy),
+				ProviderID:     providerID,
+				Success:        true,
+				Snapshot:       result.Snapshot,
+				Source:         StrategyName(strategy),
+				RecordingError: recordingError,
 			}
 		}
 
@@ -155,14 +167,14 @@ func ExecutePipeline(ctx context.Context, providerID string, strategies []Strate
 	// without misleading unconfigured users with old data.
 	if useCache && cfg.Cache != nil {
 		cached, err := cfg.Cache.Load(providerID)
+		if ctx.Err() != nil {
+			return contextCancelledOutcome(providerID)
+		}
 		if err != nil {
 			logger.Warn("loading cached snapshot failed", "provider", providerID, "err", err)
 			cached = nil
 		}
 		if cached != nil && anyAttempted {
-			if ctx.Err() != nil {
-				return contextCancelledOutcome(providerID)
-			}
 			return FetchOutcome{
 				ProviderID: providerID,
 				Success:    true,

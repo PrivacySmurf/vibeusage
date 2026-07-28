@@ -2,9 +2,12 @@ package config
 
 import (
 	"encoding/json"
+	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -117,6 +120,9 @@ func TestMigrateCredentials_PreservesOldDirOnReadError(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("requires a chmod-induced Unix directory read failure")
 	}
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores directory permission bits")
+	}
 	dir := setupTempDir(t)
 
 	// Create old-style credential directory with an unreadable subdirectory
@@ -132,8 +138,15 @@ func TestMigrateCredentials_PreservesOldDirOnReadError(t *testing.T) {
 	_ = os.Chmod(badDir, 0o000)
 	t.Cleanup(func() { _ = os.Chmod(badDir, 0o755) })
 
-	if err := MigrateCredentials(); err == nil {
+	migrationErr := MigrateCredentials()
+	if migrationErr == nil {
 		t.Fatal("MigrateCredentials() should report the unreadable legacy files")
+	}
+	if !strings.Contains(migrationErr.Error(), badDir) {
+		t.Errorf("MigrateCredentials() error = %q, want failed path %q", migrationErr, badDir)
+	}
+	if !errors.Is(migrationErr, fs.ErrPermission) {
+		t.Errorf("MigrateCredentials() error = %v, want underlying permission error", migrationErr)
 	}
 
 	// Good credential should still be migrated

@@ -29,7 +29,7 @@ func MigrateCredentials() error {
 	}
 
 	migrated := false
-	readErrors := false
+	var readErrors []error
 	entries, err := os.ReadDir(oldDir)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
@@ -47,7 +47,7 @@ func MigrateCredentials() error {
 
 		files, err := os.ReadDir(providerDir)
 		if err != nil {
-			readErrors = true
+			readErrors = append(readErrors, fmt.Errorf("reading legacy credential directory %s: %w", providerDir, err))
 			continue
 		}
 
@@ -64,9 +64,10 @@ func MigrateCredentials() error {
 				}
 			}
 
-			data, err := os.ReadFile(filepath.Join(providerDir, f.Name()))
+			path := filepath.Join(providerDir, f.Name())
+			data, err := os.ReadFile(path)
 			if err != nil {
-				readErrors = true
+				readErrors = append(readErrors, fmt.Errorf("reading legacy credential file %s: %w", path, err))
 				continue
 			}
 
@@ -92,10 +93,10 @@ func MigrateCredentials() error {
 	// Only clean up the old directory if all files were read successfully.
 	// If some files couldn't be read (permissions, I/O errors), leave them
 	// so the next migration attempt can pick them up.
-	if !readErrors {
+	if len(readErrors) == 0 {
 		_ = os.RemoveAll(oldDir)
 	} else {
-		return fmt.Errorf("some legacy credential files could not be read; they were left in %s for the next attempt", oldDir)
+		return fmt.Errorf("migrating legacy credentials; files were left in %s for the next attempt: %w", oldDir, errors.Join(readErrors...))
 	}
 
 	return nil

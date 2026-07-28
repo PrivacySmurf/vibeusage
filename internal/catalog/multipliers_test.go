@@ -98,6 +98,52 @@ func TestLookupMultiplierUsesProvider(t *testing.T) {
 	}
 }
 
+func TestLookupMultiplierMatchesTrailingParenthetical(t *testing.T) {
+	cleanup := SetMultipliersLoaderForTesting(func(context.Context) (multiplierCatalog, error) {
+		return multiplierCatalog{
+			opencodeMultiplierProvider: {"Kimi K3": 4},
+		}, nil
+	})
+	t.Cleanup(cleanup)
+
+	got := LookupMultiplier(opencodeMultiplierProvider, "Kimi K3 (2x usage)")
+	if got == nil || *got != 4 {
+		t.Errorf("LookupMultiplier() = %v, want 4", got)
+	}
+}
+
+func TestLookupMultiplierPrefersDecoratedName(t *testing.T) {
+	cleanup := SetMultipliersLoaderForTesting(func(context.Context) (multiplierCatalog, error) {
+		return multiplierCatalog{
+			opencodeMultiplierProvider: {
+				"Kimi K3":            4,
+				"Kimi-K3 (2x usage)": 2,
+			},
+		}, nil
+	})
+	t.Cleanup(cleanup)
+
+	for range 100 {
+		got := LookupMultiplier(opencodeMultiplierProvider, "Kimi K3 (2x usage)")
+		if got == nil || *got != 2 {
+			t.Fatalf("LookupMultiplier() = %v, want decorated-name multiplier 2", got)
+		}
+	}
+}
+
+func TestLookupMultiplierDoesNotStripParentheticalForOtherProviders(t *testing.T) {
+	cleanup := SetMultipliersLoaderForTesting(func(context.Context) (multiplierCatalog, error) {
+		return multiplierCatalog{
+			copilotMultiplierProvider: {"Model": 4},
+		}, nil
+	})
+	t.Cleanup(cleanup)
+
+	if got := LookupMultiplier(copilotMultiplierProvider, "Model (variant)"); got != nil {
+		t.Errorf("LookupMultiplier() = %v, want nil", got)
+	}
+}
+
 func TestLookupMultiplierEmptyData(t *testing.T) {
 	cleanup := SetMultipliersLoaderForTesting(func(context.Context) (multiplierCatalog, error) {
 		return nil, nil
