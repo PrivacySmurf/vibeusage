@@ -334,6 +334,51 @@ func TestSave_CreatesDirAndFile(t *testing.T) {
 	}
 }
 
+func TestSave_ReplacesExistingConfigAtomically(t *testing.T) {
+	dir := setupTempDir(t)
+	path := filepath.Join(dir, "config.toml")
+
+	long := DefaultConfig()
+	long.Roles["obsolete"] = RoleConfig{Models: []string{
+		"a-model-name-that-makes-the-first-config-much-longer",
+		"another-model-name-that-makes-the-first-config-much-longer",
+	}}
+	if err := Save(long, path); err != nil {
+		t.Fatalf("Save(long) error: %v", err)
+	}
+	before, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("Stat() before replacement: %v", err)
+	}
+
+	if err := Save(DefaultConfig(), path); err != nil {
+		t.Fatalf("Save(short) error: %v", err)
+	}
+	after, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("Stat() after replacement: %v", err)
+	}
+	if os.SameFile(before, after) {
+		t.Error("Save() rewrote the destination inode instead of replacing it")
+	}
+
+	loaded, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+	if _, ok := loaded.Roles["obsolete"]; ok {
+		t.Error("Save() did not completely replace the prior config")
+	}
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("ReadDir() error: %v", err)
+	}
+	if len(entries) != 1 || entries[0].Name() != "config.toml" {
+		t.Errorf("directory entries = %v, want only config.toml", entries)
+	}
+}
+
 func TestSave_Load_Roundtrip(t *testing.T) {
 	dir := setupTempDir(t)
 	path := filepath.Join(dir, "roundtrip.toml")

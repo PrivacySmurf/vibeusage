@@ -1,6 +1,7 @@
 package config
 
 import (
+	"bytes"
 	"fmt"
 	"math"
 	"os"
@@ -254,12 +255,11 @@ func saveConfigFile(cfg Config, path string) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return fmt.Errorf("saving config: %w", err)
 	}
-	f, err := os.Create(path)
-	if err != nil {
+	var data bytes.Buffer
+	if err := toml.NewEncoder(&data).Encode(cfg); err != nil {
 		return fmt.Errorf("saving config: %w", err)
 	}
-	defer func() { _ = f.Close() }()
-	if err := toml.NewEncoder(f).Encode(cfg); err != nil {
+	if err := atomicWriteFile(path, data.Bytes()); err != nil {
 		return fmt.Errorf("saving config: %w", err)
 	}
 	return nil
