@@ -14,7 +14,7 @@ import (
 	"github.com/joshuadavidthomas/vibeusage/internal/models"
 )
 
-const modelsURL = "https://generativelanguage.googleapis.com/v1beta/models"
+var modelsURL = "https://generativelanguage.googleapis.com/v1beta/models"
 
 // APIKeyStrategy fetches Gemini usage using an API key.
 type APIKeyStrategy struct {
@@ -40,7 +40,8 @@ func (s *APIKeyStrategy) Fetch(ctx context.Context) (fetch.FetchResult, error) {
 	// Validate key by fetching models
 	client := httpclient.NewFromConfig(s.HTTPTimeout)
 	var modelsResp ModelsResponse
-	resp, err := client.GetJSONCtx(ctx, modelsURL+"?key="+apiKey, &modelsResp)
+	resp, err := client.GetJSONCtx(ctx, modelsURL, &modelsResp,
+		httpclient.WithHeader("x-goog-api-key", apiKey))
 	if err != nil {
 		return fetch.ResultFail("Request failed: " + err.Error()), nil
 	}
