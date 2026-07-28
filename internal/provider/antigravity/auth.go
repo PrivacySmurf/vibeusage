@@ -2,10 +2,14 @@ package antigravity
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/base64"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"sync"
 	"time"
 
@@ -32,6 +36,11 @@ func RunAuthFlow(parent context.Context, w io.Writer, quiet bool) (bool, error) 
 		return false, fmt.Errorf("starting authorization flow: %w", err)
 	}
 
+	state, verifier, challenge, err := generateOAuthMaterial()
+	if err != nil {
+		return false, fmt.Errorf("generating OAuth state and PKCE verifier: %w", err)
+	}
+
 	// Start a local HTTP server on a random port to receive the redirect.
 	listener, err := net.Listen("tcp", "localhost:0")
 	if err != nil {
@@ -44,7 +53,7 @@ func RunAuthFlow(parent context.Context, w io.Writer, quiet bool) (bool, error) 
 	resultCh := make(chan callbackResult, 1)
 
 	mux := http.NewServeMux()
-	mux.Handle("/", newOAuthCallbackHandler(resultCh))
+	mux.Handle("/", newOAuthCallbackHandler(state, resultCh))
 
 	server := &http.Server{Handler: mux}
 	go func() { _ = server.Serve(listener) }()
@@ -55,10 +64,7 @@ func RunAuthFlow(parent context.Context, w io.Writer, quiet bool) (bool, error) 
 	}()
 
 	// Build the authorization URL.
-	authURL := fmt.Sprintf(
-		"https://accounts.google.com/o/oauth2/v2/auth?client_id=%s&redirect_uri=%s&response_type=code&scope=%s&access_type=offline&prompt=consent",
-		antigravityClientID, redirectURI, oauthScopes,
-	)
+	authURL := buildAuthorizationURL(redirectURI, state, challenge)
 
 	if !quiet {
 		device.WriteOpening(w, authURL)
@@ -84,7 +90,7 @@ func RunAuthFlow(parent context.Context, w io.Writer, quiet bool) (bool, error) 
 			}
 			return false, nil
 		}
-		return exchangeCode(parent, w, result.code, redirectURI, quiet)
+		return exchangeCode(parent, w, result.code, redirectURI, verifier, quiet)
 	case <-pollCtx.Done():
 		if parent.Err() != nil {
 			return false, fmt.Errorf("waiting for authorization callback: %w", parent.Err())
@@ -96,7 +102,7 @@ func RunAuthFlow(parent context.Context, w io.Writer, quiet bool) (bool, error) 
 	}
 }
 
-func newOAuthCallbackHandler(resultCh chan<- callbackResult) http.Handler {
+func newOAuthCallbackHandler(expectedState string, resultCh chan<- callbackResult) http.Handler {
 	var resultOnce sync.Once
 	complete := func(result callbackResult) {
 		resultOnce.Do(func() {
@@ -105,6 +111,11 @@ func newOAuthCallbackHandler(resultCh chan<- callbackResult) http.Handler {
 	}
 
 	return http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("state") != expectedState {
+			rw.WriteHeader(http.StatusNotFound)
+			return
+		}
+
 		code := r.URL.Query().Get("code")
 		errParam := r.URL.Query().Get("error")
 
@@ -133,20 +144,11 @@ func newOAuthCallbackHandler(resultCh chan<- callbackResult) http.Handler {
 }
 
 // exchangeCode exchanges the authorization code for tokens and saves them.
-func exchangeCode(ctx context.Context, w io.Writer, code, redirectURI string, quiet bool) (bool, error) {
+func exchangeCode(ctx context.Context, w io.Writer, code, redirectURI, verifier string, quiet bool) (bool, error) {
 	client := httpclient.NewFromConfig(config.Get().Fetch.Timeout)
 
 	var tokenResp google.TokenResponse
-	resp, err := client.PostFormCtx(ctx, google.TokenURL,
-		map[string]string{
-			"grant_type":    "authorization_code",
-			"code":          code,
-			"redirect_uri":  redirectURI,
-			"client_id":     antigravityClientID,
-			"client_secret": antigravityClientSecret,
-		},
-		&tokenResp,
-	)
+	resp, err := client.PostFormCtx(ctx, google.TokenURL, tokenExchangeForm(code, redirectURI, verifier), &tokenResp)
 	if err != nil {
 		if ctx.Err() != nil {
 			return false, fmt.Errorf("token exchange failed: %w", ctx.Err())
@@ -183,4 +185,62 @@ func exchangeCode(ctx context.Context, w io.Writer, code, redirectURI string, qu
 	}
 
 	return true, nil
+}
+
+func generateOAuthMaterial() (state, verifier, challenge string, err error) {
+	state, err = randomBase64URL(32)
+	if err != nil {
+		return "", "", "", err
+	}
+
+	verifier, err = randomBase64URL(32)
+	if err != nil {
+		return "", "", "", err
+	}
+
+	return state, verifier, pkceChallenge(verifier), nil
+}
+
+func randomBase64URL(size int) (string, error) {
+	bytes := make([]byte, size)
+	if _, err := rand.Read(bytes); err != nil {
+		return "", err
+	}
+	return base64.RawURLEncoding.EncodeToString(bytes), nil
+}
+
+func pkceChallenge(verifier string) string {
+	sum := sha256.Sum256([]byte(verifier))
+	return base64.RawURLEncoding.EncodeToString(sum[:])
+}
+
+func tokenExchangeForm(code, redirectURI, verifier string) map[string]string {
+	return map[string]string{
+		"grant_type":    "authorization_code",
+		"code":          code,
+		"redirect_uri":  redirectURI,
+		"client_id":     antigravityClientID,
+		"client_secret": antigravityClientSecret,
+		"code_verifier": verifier,
+	}
+}
+
+func buildAuthorizationURL(redirectURI, state, challenge string) string {
+	query := url.Values{
+		"access_type":           {"offline"},
+		"client_id":             {antigravityClientID},
+		"code_challenge":        {challenge},
+		"code_challenge_method": {"S256"},
+		"prompt":                {"consent"},
+		"redirect_uri":          {redirectURI},
+		"response_type":         {"code"},
+		"scope":                 {oauthScopes},
+		"state":                 {state},
+	}
+	return (&url.URL{
+		Scheme:   "https",
+		Host:     "accounts.google.com",
+		Path:     "/o/oauth2/v2/auth",
+		RawQuery: query.Encode(),
+	}).String()
 }
