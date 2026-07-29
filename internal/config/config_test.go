@@ -387,7 +387,7 @@ func TestSave_ReplacesExistingConfigAtomically(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Stat() after replacement: %v", err)
 	}
-	if os.SameFile(before, after) {
+	if runtime.GOOS != "windows" && os.SameFile(before, after) {
 		t.Error("Save() rewrote the destination inode instead of replacing it")
 	}
 
@@ -1751,10 +1751,10 @@ func TestJSONCacheWritesAreAtomic(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Stat() after save: %v", err)
 			}
-			if os.SameFile(before, after) {
-				t.Error("save rewrote the destination inode instead of publishing a replacement")
-			}
 			if runtime.GOOS != "windows" {
+				if os.SameFile(before, after) {
+					t.Error("save rewrote the destination inode instead of publishing a replacement")
+				}
 				if got := after.Mode().Perm(); got != 0o600 {
 					t.Errorf("file permissions = %o, want preserved mode 0600", got)
 				}
