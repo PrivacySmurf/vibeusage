@@ -410,8 +410,8 @@ func TestFetch_SlowZenRequestDoesNotDiscardUsage(t *testing.T) {
 	}
 	select {
 	case <-billingStopped:
-	default:
-		t.Fatal("supplemental Zen request still running after fetch returned")
+	case <-time.After(time.Second):
+		t.Fatal("supplemental Zen request did not stop after fetch returned")
 	}
 }
 

@@ -40,7 +40,7 @@ vet:
 
 # Check dependencies for known vulnerabilities
 vuln:
-    govulncheck ./...
+    go tool govulncheck ./...
 
 # Run all checks
 check: test lint vet vuln tidy-check
