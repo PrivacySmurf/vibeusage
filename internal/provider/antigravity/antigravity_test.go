@@ -313,7 +313,11 @@ func applyAntigravityTestEnv(t *testing.T) string {
 	t.Setenv("HOME", home)
 	t.Setenv("USERPROFILE", home)
 	testenv.ApplyVibeusage(t.Setenv, t.TempDir())
-	return cfg
+	configDir, err := os.UserConfigDir()
+	if err != nil {
+		t.Fatalf("UserConfigDir: %v", err)
+	}
+	return configDir
 }
 
 func writeAntigravityFileCreds(t *testing.T, configDir string) {
