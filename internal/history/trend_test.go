@@ -8,19 +8,20 @@ import (
 	"github.com/joshuadavidthomas/vibeusage/internal/models"
 )
 
-func trendTime(day, hour int) time.Time {
-	return time.Date(2026, time.July, day, hour, 0, 0, 0, time.UTC)
+func trendTime(month time.Month, day, hour int) time.Time {
+	return time.Date(2026, month, day, hour, 0, 0, 0, time.UTC)
 }
 
 func trendRecord(at time.Time, period models.UsagePeriod) Record {
-	return Record{Snapshot: models.UsageSnapshot{
+	return Record{V: CurrentRecordVersion, Snapshot: models.UsageSnapshot{
+		Provider:  "test",
 		FetchedAt: at,
 		Periods:   []models.UsagePeriod{period},
 	}}
 }
 
-func trendCurrent(period models.UsagePeriod) models.UsageSnapshot {
-	return models.UsageSnapshot{Periods: []models.UsagePeriod{period}}
+func trendCurrent(at time.Time, period models.UsagePeriod) models.UsageSnapshot {
+	return models.UsageSnapshot{Provider: "test", FetchedAt: at, Periods: []models.UsagePeriod{period}}
 }
 
 func dailyPeriod(utilization int, reset time.Time) models.UsagePeriod {
@@ -32,36 +33,27 @@ func dailyPeriod(utilization int, reset time.Time) models.UsagePeriod {
 	}
 }
 
-func TestTrendsBurnSlope(t *testing.T) {
-	reset := trendTime(12, 0)
-	period := dailyPeriod(42, reset)
+func TestTrendsBurnUsesNetChangeThroughCurrentSnapshot(t *testing.T) {
+	reset := trendTime(time.July, 12, 0)
+	asOf := trendTime(time.July, 11, 14)
 	records := []Record{
-		trendRecord(trendTime(11, 2), dailyPeriod(10, reset)),
-		trendRecord(trendTime(11, 8), dailyPeriod(22, reset)),
-		trendRecord(trendTime(11, 12), dailyPeriod(30, reset)),
+		trendRecord(trendTime(time.July, 11, 2), dailyPeriod(10, reset)),
+		trendRecord(trendTime(time.July, 11, 8), dailyPeriod(22, reset)),
+		trendRecord(trendTime(time.July, 11, 12), dailyPeriod(30, reset)),
 	}
 
-	trends := Trends(records, trendCurrent(period), trendTime(11, 14))
-	if len(trends) != 1 {
-		t.Fatalf("trend count = %d, want 1", len(trends))
-	}
-	if got, want := trends[0].SamplesInPeriod, 3; got != want {
+	trend := Trends(records, trendCurrent(asOf, dailyPeriod(42, reset)))[0]
+	if got, want := trend.SamplesInPeriod, 4; got != want {
 		t.Errorf("samples in period = %d, want %d", got, want)
 	}
-	if trends[0].BurnPerDay == nil {
-		t.Fatal("burn per day = nil, want value")
-	}
-	if got, want := *trends[0].BurnPerDay, 48.0; got != want {
-		t.Errorf("burn per day = %v, want %v", got, want)
+	if trend.BurnPerDay == nil || *trend.BurnPerDay != 64 {
+		t.Errorf("burn per day = %v, want 64", trend.BurnPerDay)
 	}
 }
 
-func TestTrendsOneSampleHasNoBurnRate(t *testing.T) {
-	reset := trendTime(12, 0)
-	period := dailyPeriod(42, reset)
-	records := []Record{trendRecord(trendTime(11, 2), dailyPeriod(10, reset))}
-
-	trend := Trends(records, trendCurrent(period), trendTime(11, 14))[0]
+func TestTrendsCurrentSnapshotAloneHasNoBurnRate(t *testing.T) {
+	reset := trendTime(time.July, 12, 0)
+	trend := Trends(nil, trendCurrent(trendTime(time.July, 11, 14), dailyPeriod(42, reset)))[0]
 	if trend.BurnPerDay != nil {
 		t.Errorf("burn per day = %v, want nil", *trend.BurnPerDay)
 	}
@@ -71,14 +63,14 @@ func TestTrendsOneSampleHasNoBurnRate(t *testing.T) {
 }
 
 func TestTrendsSamePointUsesClosestElapsedRatio(t *testing.T) {
-	reset := trendTime(12, 0)
-	period := dailyPeriod(50, reset)
+	reset := trendTime(time.July, 12, 0)
+	previousReset := trendTime(time.July, 11, 0)
 	records := []Record{
-		trendRecord(trendTime(10, 10), dailyPeriod(20, reset)),
-		trendRecord(trendTime(10, 11), dailyPeriod(35, reset)),
+		trendRecord(trendTime(time.July, 10, 10), dailyPeriod(20, previousReset)),
+		trendRecord(trendTime(time.July, 10, 11), dailyPeriod(35, previousReset)),
 	}
 
-	trend := Trends(records, trendCurrent(period), trendTime(11, 10))[0]
+	trend := Trends(records, trendCurrent(trendTime(time.July, 11, 10), dailyPeriod(50, reset)))[0]
 	if trend.SamePointLastPeriod == nil || *trend.SamePointLastPeriod != 20 {
 		t.Errorf("same point = %v, want 20", trend.SamePointLastPeriod)
 	}
@@ -87,72 +79,134 @@ func TestTrendsSamePointUsesClosestElapsedRatio(t *testing.T) {
 	}
 }
 
-func TestTrendsIgnoresTwoWindowsAgo(t *testing.T) {
-	reset := trendTime(12, 0)
-	period := dailyPeriod(50, reset)
-	records := []Record{trendRecord(trendTime(8, 8), dailyPeriod(90, reset))}
-
-	trend := Trends(records, trendCurrent(period), trendTime(11, 8))[0]
-	if trend.SamePointLastPeriod != nil {
-		t.Errorf("same point = %v, want nil", *trend.SamePointLastPeriod)
+func TestTrendsUsesHalfOpenResetWindows(t *testing.T) {
+	reset := trendTime(time.July, 12, 0)
+	currentStart := trendTime(time.July, 11, 0)
+	previousReset := currentStart
+	records := []Record{
+		trendRecord(trendTime(time.July, 10, 23), dailyPeriod(80, previousReset)),
+		trendRecord(currentStart, dailyPeriod(0, reset)),
+		trendRecord(trendTime(time.July, 11, 1), dailyPeriod(10, reset)),
+		trendRecord(reset, dailyPeriod(0, reset.Add(24*time.Hour))),
 	}
-	if trend.LastCompleteFinal != nil {
-		t.Errorf("last complete final = %v, want nil", *trend.LastCompleteFinal)
+
+	trend := Trends(records, trendCurrent(trendTime(time.July, 11, 2), dailyPeriod(20, reset)))[0]
+	if trend.LastCompleteFinal == nil || *trend.LastCompleteFinal != 80 {
+		t.Errorf("last complete final = %v, want 80", trend.LastCompleteFinal)
+	}
+	if got, want := trend.SamplesInPeriod, 3; got != want {
+		t.Errorf("current samples = %d, want %d", got, want)
 	}
 }
 
-func TestTrendsWithoutResetUsesTrailingLookback(t *testing.T) {
-	period := models.UsagePeriod{Name: "Credits", Utilization: 40, PeriodType: models.PeriodDaily}
-	now := trendTime(11, 12)
+func TestTrendsAcceptsSmallResetEstimateJitter(t *testing.T) {
+	reset := trendTime(time.July, 12, 0)
+	jitteredReset := reset.Add(30 * time.Second)
 	records := []Record{
-		trendRecord(trendTime(10, 12), models.UsagePeriod{Name: "Credits", Utilization: 5, PeriodType: models.PeriodDaily}),
-		trendRecord(trendTime(11, 0), models.UsagePeriod{Name: "Credits", Utilization: 20, PeriodType: models.PeriodDaily}),
-		trendRecord(trendTime(9, 12), models.UsagePeriod{Name: "Credits", Utilization: 99, PeriodType: models.PeriodDaily}),
+		trendRecord(trendTime(time.July, 11, 2), dailyPeriod(10, jitteredReset)),
 	}
 
-	trend := Trends(records, trendCurrent(period), now)[0]
-	if trend.SamePointLastPeriod != nil || trend.LastCompleteFinal != nil {
-		t.Errorf("period without reset should have no Q1/Q2: %+v", trend)
+	trend := Trends(records, trendCurrent(trendTime(time.July, 11, 8), dailyPeriod(40, reset)))[0]
+	if got, want := trend.SamplesInPeriod, 2; got != want {
+		t.Errorf("samples in period = %d, want %d", got, want)
 	}
-	if trend.BurnPerDay == nil || *trend.BurnPerDay != 30 {
-		t.Errorf("burn per day = %v, want 30", trend.BurnPerDay)
+	if trend.BurnPerDay == nil {
+		t.Fatal("burn per day = nil, want value")
 	}
+}
+
+func TestTrendsAcceptsResetJitterAtWindowStart(t *testing.T) {
+	reset := trendTime(time.July, 12, 0).Add(30 * time.Second)
+	historicalReset := reset.Add(-30 * time.Second)
+	records := []Record{
+		trendRecord(trendTime(time.July, 11, 0).Add(10*time.Second), dailyPeriod(0, historicalReset)),
+	}
+
+	trend := Trends(records, trendCurrent(trendTime(time.July, 11, 0).Add(time.Minute), dailyPeriod(10, reset)))[0]
 	if got, want := trend.SamplesInPeriod, 2; got != want {
 		t.Errorf("samples in period = %d, want %d", got, want)
 	}
 }
 
-func TestTrendsOnlyReportsCurrentIdentities(t *testing.T) {
-	reset := trendTime(12, 0)
-	records := []Record{trendRecord(trendTime(11, 2), dailyPeriod(20, reset))}
-	current := trendCurrent(models.UsagePeriod{Name: "Weekly", Utilization: 10, PeriodType: models.PeriodWeekly, ResetsAt: &reset})
+func TestTrendsRejectsMismatchedHistoricalReset(t *testing.T) {
+	reset := trendTime(time.July, 12, 0)
+	wrongReset := trendTime(time.July, 13, 0)
+	records := []Record{
+		trendRecord(trendTime(time.July, 11, 2), dailyPeriod(90, wrongReset)),
+	}
 
-	trends := Trends(records, current, trendTime(11, 4))
+	trend := Trends(records, trendCurrent(trendTime(time.July, 11, 4), dailyPeriod(20, reset)))[0]
+	if trend.BurnPerDay != nil || trend.SamplesInPeriod != 1 {
+		t.Errorf("mismatched reset affected trend: %+v", trend)
+	}
+}
+
+func TestTrendsIgnoresFutureRecords(t *testing.T) {
+	reset := trendTime(time.July, 12, 0)
+	asOf := trendTime(time.July, 11, 8)
+	records := []Record{
+		trendRecord(trendTime(time.July, 11, 2), dailyPeriod(10, reset)),
+		trendRecord(trendTime(time.July, 11, 10), dailyPeriod(90, reset)),
+	}
+
+	trend := Trends(records, trendCurrent(asOf, dailyPeriod(30, reset)))[0]
+	if got, want := trend.SamplesInPeriod, 2; got != want {
+		t.Errorf("samples in period = %d, want %d", got, want)
+	}
+	if trend.BurnPerDay == nil || *trend.BurnPerDay != 80 {
+		t.Errorf("burn per day = %v, want 80", trend.BurnPerDay)
+	}
+}
+
+func TestTrendsWithoutResetUsesTrailingLookback(t *testing.T) {
+	period := models.UsagePeriod{Name: "Credits", Utilization: 40, PeriodType: models.PeriodDaily}
+	asOf := trendTime(time.July, 11, 12)
+	records := []Record{
+		trendRecord(trendTime(time.July, 10, 12), models.UsagePeriod{Name: "Credits", Utilization: 5, PeriodType: models.PeriodDaily}),
+		trendRecord(trendTime(time.July, 11, 0), models.UsagePeriod{Name: "Credits", Utilization: 20, PeriodType: models.PeriodDaily}),
+		trendRecord(trendTime(time.July, 9, 12), models.UsagePeriod{Name: "Credits", Utilization: 99, PeriodType: models.PeriodDaily}),
+	}
+
+	trend := Trends(records, trendCurrent(asOf, period))[0]
+	if trend.SamePointLastPeriod != nil || trend.LastCompleteFinal != nil {
+		t.Errorf("period without reset should have no comparisons: %+v", trend)
+	}
+	if trend.BurnPerDay == nil || *trend.BurnPerDay != 35 {
+		t.Errorf("burn per day = %v, want 35", trend.BurnPerDay)
+	}
+	if got, want := trend.SamplesInPeriod, 3; got != want {
+		t.Errorf("samples in period = %d, want %d", got, want)
+	}
+}
+
+func TestTrendsOnlyReportsCurrentIdentities(t *testing.T) {
+	reset := trendTime(time.July, 12, 0)
+	records := []Record{trendRecord(trendTime(time.July, 11, 2), dailyPeriod(20, reset))}
+	current := trendCurrent(trendTime(time.July, 11, 4), models.UsagePeriod{Name: "Weekly", Utilization: 10, PeriodType: models.PeriodWeekly, ResetsAt: &reset})
+
+	trends := Trends(records, current)
 	if len(trends) != 1 || trends[0].Identity.Name != "Weekly" {
 		t.Errorf("trends = %+v, want only current Weekly period", trends)
 	}
 }
 
 func TestTrendsMatchesPeriodsByTypeNameAndModel(t *testing.T) {
-	reset := trendTime(12, 0)
+	reset := trendTime(time.July, 12, 0)
+	previousReset := trendTime(time.July, 11, 0)
 	modelA := models.UsagePeriod{Name: "Models", Model: "a", Utilization: 30, PeriodType: models.PeriodDaily, ResetsAt: &reset}
 	modelB := models.UsagePeriod{Name: "Models", Model: "b", Utilization: 99, PeriodType: models.PeriodDaily, ResetsAt: &reset}
 	records := []Record{
-		{Snapshot: models.UsageSnapshot{FetchedAt: trendTime(10, 12), Periods: []models.UsagePeriod{
-			modelB,
-			{Name: "Models", Model: "a", Utilization: 20, PeriodType: models.PeriodDaily, ResetsAt: &reset},
+		{V: CurrentRecordVersion, Snapshot: models.UsageSnapshot{Provider: "test", FetchedAt: trendTime(time.July, 10, 12), Periods: []models.UsagePeriod{
+			{Name: "Models", Model: "b", Utilization: 99, PeriodType: models.PeriodDaily, ResetsAt: &previousReset},
+			{Name: "Models", Model: "a", Utilization: 20, PeriodType: models.PeriodDaily, ResetsAt: &previousReset},
 		}}},
-		{Snapshot: models.UsageSnapshot{FetchedAt: trendTime(11, 2), Periods: []models.UsagePeriod{
+		{V: CurrentRecordVersion, Snapshot: models.UsageSnapshot{Provider: "test", FetchedAt: trendTime(time.July, 11, 2), Periods: []models.UsagePeriod{
 			modelB,
 			{Name: "Models", Model: "a", Utilization: 10, PeriodType: models.PeriodDaily, ResetsAt: &reset},
 		}}},
-		{Snapshot: models.UsageSnapshot{FetchedAt: trendTime(11, 8), Periods: []models.UsagePeriod{
-			{Name: "Models", Model: "a", Utilization: 22, PeriodType: models.PeriodDaily, ResetsAt: &reset},
-			modelB,
-		}}},
 	}
 
-	trend := Trends(records, trendCurrent(modelA), trendTime(11, 12))[0]
+	trend := Trends(records, trendCurrent(trendTime(time.July, 11, 8), modelA))[0]
 	if got, want := trend.SamplesInPeriod, 2; got != want {
 		t.Errorf("samples in period = %d, want %d", got, want)
 	}
@@ -162,48 +216,84 @@ func TestTrendsMatchesPeriodsByTypeNameAndModel(t *testing.T) {
 	if trend.LastCompleteFinal == nil || *trend.LastCompleteFinal != 20 {
 		t.Errorf("last complete final = %v, want 20", trend.LastCompleteFinal)
 	}
-	if trend.BurnPerDay == nil || *trend.BurnPerDay != 48 {
-		t.Errorf("burn per day = %v, want 48", trend.BurnPerDay)
+	if trend.BurnPerDay == nil || *trend.BurnPerDay != 80 {
+		t.Errorf("burn per day = %v, want 80", trend.BurnPerDay)
 	}
 }
 
-func TestTrendsDeltaCanBeNegative(t *testing.T) {
-	reset := trendTime(12, 0)
-	period := dailyPeriod(33, reset)
-	records := []Record{trendRecord(trendTime(10, 21), dailyPeriod(40, reset))}
-
-	trend := Trends(records, trendCurrent(period), trendTime(11, 21))[0]
-	if trend.SamePointDelta == nil || *trend.SamePointDelta != -7 {
-		t.Errorf("delta = %v, want -7", trend.SamePointDelta)
-	}
-}
-
-func TestTrendsLastCompleteFinalUsesLatestTimestamp(t *testing.T) {
-	reset := trendTime(12, 0)
-	period := dailyPeriod(50, reset)
+func TestTrendsDeduplicatesCurrentTimestampAndUsesCurrentValue(t *testing.T) {
+	reset := trendTime(time.July, 12, 0)
+	asOf := trendTime(time.July, 11, 8)
 	records := []Record{
-		trendRecord(trendTime(10, 20), dailyPeriod(90, reset)),
-		trendRecord(trendTime(10, 4), dailyPeriod(20, reset)),
+		trendRecord(trendTime(time.July, 11, 2), dailyPeriod(10, reset)),
+		trendRecord(asOf, dailyPeriod(25, reset)),
+		trendRecord(asOf, dailyPeriod(28, reset)),
 	}
 
-	trend := Trends(records, trendCurrent(period), trendTime(11, 4))[0]
-	if trend.LastCompleteFinal == nil || *trend.LastCompleteFinal != 90 {
-		t.Errorf("last complete final = %v, want 90", trend.LastCompleteFinal)
+	trend := Trends(records, trendCurrent(asOf, dailyPeriod(40, reset)))[0]
+	if got, want := trend.SamplesInPeriod, 2; got != want {
+		t.Errorf("samples in period = %d, want %d", got, want)
+	}
+	if trend.BurnPerDay == nil || *trend.BurnPerDay != 120 {
+		t.Errorf("burn per day = %v, want 120", trend.BurnPerDay)
+	}
+}
+
+func TestTrendsIrregularCadenceUsesNetChange(t *testing.T) {
+	period := models.UsagePeriod{Name: "Credits", Utilization: 33, PeriodType: models.PeriodDaily}
+	asOf := trendTime(time.July, 11, 0)
+	records := []Record{
+		trendRecord(trendTime(time.July, 10, 0), models.UsagePeriod{Name: "Credits", Utilization: 0, PeriodType: models.PeriodDaily}),
+		trendRecord(trendTime(time.July, 10, 1), models.UsagePeriod{Name: "Credits", Utilization: 10, PeriodType: models.PeriodDaily}),
+	}
+
+	trend := Trends(records, trendCurrent(asOf, period))[0]
+	if trend.BurnPerDay == nil || *trend.BurnPerDay != 33 {
+		t.Errorf("burn per day = %v, want 33", trend.BurnPerDay)
+	}
+}
+
+func TestMonthlyPeriodStartUsesFixedThirtyDays(t *testing.T) {
+	marchEnd := time.Date(2026, time.March, 31, 0, 0, 0, 0, time.UTC)
+	start, ok := periodStart(marchEnd, models.PeriodMonthly)
+	if !ok || !start.Equal(time.Date(2026, time.March, 1, 0, 0, 0, 0, time.UTC)) {
+		t.Fatalf("monthly boundary = %s, want 2026-03-01", start)
+	}
+}
+
+func TestTrendsResetlessMonthlyUsesThirtyDayLookback(t *testing.T) {
+	asOf := trendTime(time.July, 31, 0)
+	period := models.UsagePeriod{Name: "Monthly", Utilization: 40, PeriodType: models.PeriodMonthly}
+	records := []Record{trendRecord(asOf.Add(-30*24*time.Hour), models.UsagePeriod{
+		Name: "Monthly", Utilization: 10, PeriodType: models.PeriodMonthly,
+	})}
+
+	trend := Trends(records, trendCurrent(asOf, period))[0]
+	if trend.BurnPerDay == nil || *trend.BurnPerDay != 1 {
+		t.Errorf("burn per day = %v, want 1", trend.BurnPerDay)
+	}
+}
+
+func TestTrendsUnknownPeriodDoesNotFabricateMetrics(t *testing.T) {
+	period := models.UsagePeriod{Name: "Unknown", Utilization: 50, PeriodType: models.PeriodType("hourly")}
+	trend := Trends(nil, trendCurrent(trendTime(time.July, 11, 0), period))[0]
+	if trend.BurnPerDay != nil || trend.SamplesInPeriod != 0 {
+		t.Errorf("unknown period produced metrics: %+v", trend)
 	}
 }
 
 func TestTrendsKeepsZeroValuesAndDoesNotMutateRecords(t *testing.T) {
-	reset := trendTime(12, 0)
-	period := dailyPeriod(0, reset)
+	reset := trendTime(time.July, 12, 0)
+	previousReset := trendTime(time.July, 11, 0)
 	records := []Record{
-		trendRecord(trendTime(11, 4), dailyPeriod(0, reset)),
-		trendRecord(trendTime(10, 4), dailyPeriod(0, reset)),
+		trendRecord(trendTime(time.July, 11, 4), dailyPeriod(0, reset)),
+		trendRecord(trendTime(time.July, 10, 4), dailyPeriod(0, previousReset)),
 	}
 	original := append([]Record(nil), records...)
 
-	trend := Trends(records, trendCurrent(period), trendTime(11, 4))[0]
+	trend := Trends(records, trendCurrent(trendTime(time.July, 11, 4), dailyPeriod(0, reset)))[0]
 	if trend.SamePointLastPeriod == nil || trend.SamePointDelta == nil {
-		t.Errorf("zero Q1 values should be non-nil: %+v", trend)
+		t.Errorf("zero comparison values should be non-nil: %+v", trend)
 	}
 	if !reflect.DeepEqual(records, original) {
 		t.Errorf("Trends mutated records: got %#v, want %#v", records, original)

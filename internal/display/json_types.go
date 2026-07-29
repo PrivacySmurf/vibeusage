@@ -1,6 +1,10 @@
 package display
 
-import "github.com/joshuadavidthomas/vibeusage/internal/models"
+import (
+	"time"
+
+	"github.com/joshuadavidthomas/vibeusage/internal/models"
+)
 
 // SnapshotErrorJSON represents a failed fetch outcome.
 type SnapshotErrorJSON struct {
@@ -78,12 +82,16 @@ type ActionResultJSON struct {
 // HistoryJSON represents historical usage trends grouped by provider.
 type HistoryJSON struct {
 	Providers map[string]HistoryProviderJSON `json:"providers"`
+	Errors    map[string]string              `json:"errors"`
 }
 
 // HistoryProviderJSON represents a provider's history summary.
 type HistoryProviderJSON struct {
 	DaysRecorded int                 `json:"days_recorded"`
 	Samples      int                 `json:"samples"`
+	FetchedAt    time.Time           `json:"fetched_at"`
+	Cached       bool                `json:"cached"`
+	Source       string              `json:"source,omitempty"`
 	Periods      []HistoryPeriodJSON `json:"periods"`
 }
 

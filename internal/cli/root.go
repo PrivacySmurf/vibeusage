@@ -67,6 +67,9 @@ var rootCmd = &cobra.Command{
 		if _, err := config.Init(); err != nil {
 			l.Warn("config file is invalid, using defaults", "err", err)
 		}
+		if err := history.Migrate(); err != nil {
+			l.Warn("history migration failed", "err", err)
+		}
 
 		// Migrate legacy per-file credentials to consolidated format.
 		if err := config.MigrateCredentials(); err != nil {

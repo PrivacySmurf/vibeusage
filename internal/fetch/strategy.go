@@ -18,10 +18,11 @@ type Cache interface {
 }
 
 // Recorder persists a successfully fetched snapshot to long-term history.
+// The result reports whether the snapshot contained recordable usage.
 // Implementations must tolerate frequent, concurrent calls; failures are
 // logged by the pipeline and never fail the fetch.
 type Recorder interface {
-	Record(snapshot models.UsageSnapshot) error
+	Record(snapshot models.UsageSnapshot) (bool, error)
 }
 
 // ThrottleMarker is a persisted record that a provider asked us to stop
@@ -102,6 +103,7 @@ type FetchOutcome struct {
 	Source         string                `json:"source,omitempty"`
 	Error          string                `json:"error,omitempty"`
 	RecordingError string                `json:"-"`
+	Recorded       bool                  `json:"-"`
 	Cached         bool                  `json:"cached"`
 }
 

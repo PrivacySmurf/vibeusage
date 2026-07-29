@@ -65,14 +65,14 @@ type memRecorder struct {
 	recordErr error
 }
 
-func (r *memRecorder) Record(snap models.UsageSnapshot) error {
+func (r *memRecorder) Record(snap models.UsageSnapshot) (bool, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.recordErr != nil {
-		return r.recordErr
+		return false, r.recordErr
 	}
 	r.calls = append(r.calls, snap)
-	return nil
+	return true, nil
 }
 
 func (r *memRecorder) callCount() int {
@@ -420,7 +420,7 @@ func TestExecutePipeline_ContextPassedToStrategy(t *testing.T) {
 		fetchFn: func(ctx context.Context) (FetchResult, error) {
 			receivedCtx = ctx
 			snap := models.UsageSnapshot{
-				Provider:  "test",
+				Provider:  "test-provider",
 				FetchedAt: time.Now().UTC(),
 				Periods:   []models.UsagePeriod{{Name: "test", Utilization: 50}},
 			}
@@ -450,7 +450,7 @@ func TestExecutePipeline_ContextPassedToStrategy(t *testing.T) {
 
 func TestExecutePipeline_SuccessfulFetch(t *testing.T) {
 	snap := models.UsageSnapshot{
-		Provider:  "test",
+		Provider:  "test-provider",
 		FetchedAt: time.Now().UTC(),
 		Periods:   []models.UsagePeriod{{Name: "daily", Utilization: 42}},
 		Source:    "mock",
@@ -478,6 +478,52 @@ func TestExecutePipeline_SuccessfulFetch(t *testing.T) {
 	}
 }
 
+func TestExecutePipeline_RejectsProviderMismatchBeforeEffects(t *testing.T) {
+	cache := newMemCache()
+	recorder := &memRecorder{}
+	mismatched := testSnapshot("codex", "mock", 42)
+	outcome := ExecutePipeline(context.Background(), "claude", []Strategy{
+		&mockStrategy{
+			available: true,
+			fetchFn: func(context.Context) (FetchResult, error) {
+				return ResultOK(mismatched), nil
+			},
+		},
+	}, true, PipelineConfig{
+		Timeout:  time.Second,
+		Cache:    cache,
+		Recorder: recorder,
+	})
+
+	if outcome.Success || !strings.Contains(outcome.Error, "Provider mismatch") {
+		t.Fatalf("mismatched outcome = %+v", outcome)
+	}
+	if recorder.callCount() != 0 {
+		t.Errorf("recorder calls = %d, want 0", recorder.callCount())
+	}
+	if len(cache.data) != 0 {
+		t.Errorf("cache after mismatch = %#v, want empty", cache.data)
+	}
+}
+
+func TestExecutePipeline_IgnoresMismatchedCachedSnapshot(t *testing.T) {
+	cache := &memCache{data: map[string]models.UsageSnapshot{
+		"claude": testSnapshot("codex", "cached", 30),
+	}}
+	outcome := ExecutePipeline(context.Background(), "claude", []Strategy{
+		&mockStrategy{
+			available: true,
+			fetchFn: func(context.Context) (FetchResult, error) {
+				return ResultFail("service unavailable"), nil
+			},
+		},
+	}, true, PipelineConfig{Timeout: time.Second, Cache: cache, FreshCacheTTL: time.Minute})
+
+	if outcome.Success || outcome.Cached || outcome.Error != "service unavailable" {
+		t.Fatalf("mismatched cached outcome = %+v", outcome)
+	}
+}
+
 func TestExecutePipeline_RecordsLiveFetch(t *testing.T) {
 	recorder := &memRecorder{}
 	snapshot := testSnapshot("test-provider", "mock", 42)
@@ -495,6 +541,9 @@ func TestExecutePipeline_RecordsLiveFetch(t *testing.T) {
 	}
 	if recorder.callCount() != 1 {
 		t.Errorf("recorder calls = %d, want 1", recorder.callCount())
+	}
+	if !outcome.Recorded {
+		t.Error("live outcome was not marked recorded")
 	}
 	if !reflect.DeepEqual(recorder.calls[0], snapshot) {
 		t.Errorf("recorded snapshot = %+v, want %+v", recorder.calls[0], snapshot)
@@ -586,7 +635,7 @@ func TestExecutePipeline_RecordingFailurePreservesLiveSuccess(t *testing.T) {
 func TestExecutePipeline_FallbackToSecondStrategy(t *testing.T) {
 	type fallbackStrategy struct{ mockStrategy }
 
-	snap := testSnapshot("test", "fallback", 10)
+	snap := testSnapshot("test-provider", "fallback", 10)
 
 	strategies := []Strategy{
 		&mockStrategy{
@@ -715,7 +764,7 @@ func TestExecutePipeline_TimeoutCancelsBeforeFallingBack(t *testing.T) {
 	releaseFirst := make(chan struct{})
 	defer close(releaseFirst)
 
-	snap := testSnapshot("test", "fast", 42)
+	snap := testSnapshot("test-provider", "fast", 42)
 	strategies := []Strategy{
 		&mockStrategy{
 			available: true,
@@ -776,7 +825,7 @@ func TestExecutePipeline_FetchReturnsGoError(t *testing.T) {
 func TestExecutePipeline_GoErrorFallsBackToNextStrategy(t *testing.T) {
 	type backupStrategy struct{ mockStrategy }
 
-	snap := testSnapshot("test", "backup", 25)
+	snap := testSnapshot("test-provider", "backup", 25)
 	strategies := []Strategy{
 		&mockStrategy{
 			available: true,
@@ -1138,7 +1187,7 @@ func TestExecutePipeline_CacheDisabled(t *testing.T) {
 func TestExecutePipeline_ThreeStrategyChain(t *testing.T) {
 	type thirdStrategy struct{ mockStrategy }
 
-	snap := testSnapshot("test", "third", 75)
+	snap := testSnapshot("test-provider", "third", 75)
 	strategies := []Strategy{
 		&mockStrategy{
 			available: true,
@@ -1241,14 +1290,14 @@ func TestExecutePipeline_SuccessStopsChain(t *testing.T) {
 		&mockStrategy{
 			available: true,
 			fetchFn: func(ctx context.Context) (FetchResult, error) {
-				return ResultOK(testSnapshot("test", "first", 20)), nil
+				return ResultOK(testSnapshot("test-provider", "first", 20)), nil
 			},
 		},
 		&mockStrategy{
 			available: true,
 			fetchFn: func(ctx context.Context) (FetchResult, error) {
 				secondCalled = true
-				return ResultOK(testSnapshot("test", "second", 0)), nil
+				return ResultOK(testSnapshot("test-provider", "second", 0)), nil
 			},
 		},
 	}
@@ -1306,7 +1355,7 @@ func TestExecutePipeline_ProviderIDInOutcome(t *testing.T) {
 }
 
 func TestExecutePipeline_SkipsUnavailableTriesAvailable(t *testing.T) {
-	snap := testSnapshot("test", "mock", 55)
+	snap := testSnapshot("test-provider", "mock", 55)
 	strategies := []Strategy{
 		&mockStrategy{
 			available: false,

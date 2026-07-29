@@ -46,7 +46,7 @@ func ExecutePipeline(ctx context.Context, providerID string, strategies []Strate
 					logger.Warn("loading cached snapshot failed", "provider", providerID, "err", err)
 					cached = nil
 				}
-				if cached != nil {
+				if cachedSnapshotMatchesProvider(cached, providerID) {
 					return FetchOutcome{
 						ProviderID: providerID,
 						Success:    true,
@@ -77,7 +77,7 @@ func ExecutePipeline(ctx context.Context, providerID string, strategies []Strate
 			logger.Warn("loading cached snapshot failed", "provider", providerID, "err", err)
 			cached = nil
 		}
-		if isFreshSnapshot(cached, cfg.FreshCacheTTL) {
+		if cachedSnapshotMatchesProvider(cached, providerID) && isFreshSnapshot(cached, cfg.FreshCacheTTL) {
 			return FetchOutcome{
 				ProviderID: providerID,
 				Success:    true,
@@ -123,14 +123,21 @@ func ExecutePipeline(ctx context.Context, providerID string, strategies []Strate
 		}
 
 		if result.Success && result.Snapshot != nil {
+			if result.Snapshot.Provider != providerID {
+				lastErr = fmt.Sprintf("Provider mismatch: expected %s, got %s", providerID, result.Snapshot.Provider)
+				continue
+			}
 			if cfg.Cache != nil {
 				if err := cfg.Cache.Save(*result.Snapshot); err != nil {
 					logger.Warn("saving cached snapshot failed", "provider", providerID, "err", err)
 				}
 			}
+			recorded := false
 			recordingError := ""
 			if cfg.Recorder != nil {
-				if err := cfg.Recorder.Record(*result.Snapshot); err != nil {
+				var err error
+				recorded, err = cfg.Recorder.Record(*result.Snapshot)
+				if err != nil {
 					logger.Warn("recording usage history failed", "provider", providerID, "err", err)
 					recordingError = err.Error()
 				}
@@ -147,6 +154,7 @@ func ExecutePipeline(ctx context.Context, providerID string, strategies []Strate
 				Snapshot:       result.Snapshot,
 				Source:         StrategyName(strategy),
 				RecordingError: recordingError,
+				Recorded:       recorded,
 			}
 		}
 
@@ -174,7 +182,7 @@ func ExecutePipeline(ctx context.Context, providerID string, strategies []Strate
 			logger.Warn("loading cached snapshot failed", "provider", providerID, "err", err)
 			cached = nil
 		}
-		if cached != nil && anyAttempted {
+		if cachedSnapshotMatchesProvider(cached, providerID) && anyAttempted {
 			return FetchOutcome{
 				ProviderID: providerID,
 				Success:    true,
@@ -213,6 +221,10 @@ func hasAvailableStrategy(strategies []Strategy) bool {
 		}
 	}
 	return false
+}
+
+func cachedSnapshotMatchesProvider(snapshot *models.UsageSnapshot, providerID string) bool {
+	return snapshot != nil && snapshot.Provider == providerID
 }
 
 func isFreshSnapshot(snapshot *models.UsageSnapshot, ttl time.Duration) bool {

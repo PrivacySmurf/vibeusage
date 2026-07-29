@@ -295,6 +295,289 @@ func TestAppendCompactionPreservesPrivateMode(t *testing.T) {
 	}
 }
 
+func TestPipelineRecorderSkipsSnapshotsWithoutUsagePeriods(t *testing.T) {
+	t.Setenv("VIBEUSAGE_DATA_DIR", t.TempDir())
+	recorder := PipelineRecorder{}
+	periodless := models.UsageSnapshot{Provider: "opencode", FetchedAt: time.Now()}
+
+	recorded, err := recorder.Record(periodless)
+	if err != nil {
+		t.Fatalf("Record() error = %v", err)
+	}
+	if recorded {
+		t.Fatal("Record() = true for periodless snapshot")
+	}
+	if records, err := Read("opencode"); err != nil || len(records) != 0 {
+		t.Errorf("periodless history = %v, %v; want empty", records, err)
+	}
+
+	recorded, err = recorder.Record(testSnapshot("opencode", "Monthly", time.Now()))
+	if err != nil {
+		t.Fatalf("Record() with usage error = %v", err)
+	}
+	if !recorded {
+		t.Fatal("Record() = false for snapshot with usage period")
+	}
+}
+
+func TestReadPurgesExistingPeriodlessRecords(t *testing.T) {
+	t.Setenv("VIBEUSAGE_DATA_DIR", t.TempDir())
+	writeRecords(t, "opencode", Record{V: CurrentRecordVersion, Snapshot: models.UsageSnapshot{
+		Provider: "opencode", FetchedAt: time.Now(),
+	}})
+
+	records, err := Read("opencode")
+	if err != nil {
+		t.Fatalf("Read() error = %v", err)
+	}
+	if len(records) != 0 {
+		t.Fatalf("records = %v, want empty", records)
+	}
+	data, err := os.ReadFile(historyPath("opencode"))
+	if err != nil {
+		t.Fatalf("reading compacted history: %v", err)
+	}
+	if len(data) != 0 {
+		t.Errorf("periodless history file = %s, want empty", data)
+	}
+}
+
+func TestAppendStoresOnlyHistoryFields(t *testing.T) {
+	t.Setenv("VIBEUSAGE_DATA_DIR", t.TempDir())
+	balance := 12.5
+	autoReload := true
+	snap := testSnapshot("claude", "daily", time.Now())
+	snap.Identity = &models.ProviderIdentity{Email: "private@example.com", Organization: "Secret Org", Plan: "Enterprise"}
+	snap.Billing = &models.BillingDetail{Balance: &balance, AutoReload: &autoReload}
+	snap.Source = "oauth"
+
+	if err := Append("claude", snap); err != nil {
+		t.Fatalf("appending history: %v", err)
+	}
+	data, err := os.ReadFile(historyPath("claude"))
+	if err != nil {
+		t.Fatalf("reading history file: %v", err)
+	}
+	for _, secret := range []string{"private@example.com", "Secret Org", "Enterprise", "oauth", "identity", "billing"} {
+		if strings.Contains(string(data), secret) {
+			t.Errorf("history contains private snapshot field %q: %s", secret, data)
+		}
+	}
+	if !strings.Contains(string(data), `"utilization":42`) {
+		t.Errorf("history omitted utilization: %s", data)
+	}
+}
+
+func TestHistoryRejectsInvalidProviderAndSnapshotIdentity(t *testing.T) {
+	t.Setenv("VIBEUSAGE_DATA_DIR", t.TempDir())
+	at := time.Now()
+	for _, providerID := range []string{"", "../escape", `..\\escape`, "Claude", "z.ai", "/absolute"} {
+		snap := testSnapshot(providerID, "daily", at)
+		if err := Append(providerID, snap); err == nil {
+			t.Errorf("Append(%q) succeeded, want error", providerID)
+		}
+	}
+	if err := Append("claude", testSnapshot("codex", "daily", at)); err == nil || !strings.Contains(err.Error(), "snapshot provider") {
+		t.Fatalf("mismatched snapshot error = %v", err)
+	}
+	if _, err := Read("../escape"); err == nil {
+		t.Fatal("Read() accepted path traversal provider")
+	}
+	if err := Clear("../escape"); err == nil {
+		t.Fatal("Clear() accepted path traversal provider")
+	}
+}
+
+func TestAppendRejectsInvalidTimestamps(t *testing.T) {
+	t.Setenv("VIBEUSAGE_DATA_DIR", t.TempDir())
+	tests := []struct {
+		name string
+		at   time.Time
+	}{
+		{name: "missing"},
+		{name: "future", at: time.Now().Add(DedupFloor + time.Minute)},
+		{name: "expired", at: time.Now().AddDate(0, 0, -MaxAgeDays-1)},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if err := Append("claude", testSnapshot("claude", "daily", tt.at)); err == nil {
+				t.Fatal("Append() succeeded, want timestamp error")
+			}
+		})
+	}
+}
+
+func TestReadSortsRecordsByFetchedAt(t *testing.T) {
+	t.Setenv("VIBEUSAGE_DATA_DIR", t.TempDir())
+	first := time.Now().Add(-3 * time.Hour)
+	second := first.Add(time.Hour)
+	third := second.Add(time.Hour)
+	writeRecords(t, "claude",
+		Record{V: CurrentRecordVersion, Snapshot: testSnapshot("claude", "third", third)},
+		Record{V: CurrentRecordVersion, Snapshot: testSnapshot("claude", "first", first)},
+		Record{V: CurrentRecordVersion, Snapshot: testSnapshot("claude", "second", second)},
+	)
+
+	records, err := Read("claude")
+	if err != nil {
+		t.Fatalf("Read() error = %v", err)
+	}
+	for i, want := range []string{"first", "second", "third"} {
+		if got := records[i].Snapshot.Periods[0].Name; got != want {
+			t.Errorf("record %d = %q, want %q", i, got, want)
+		}
+	}
+}
+
+func TestReadRefusesUnsupportedRecordVersion(t *testing.T) {
+	t.Setenv("VIBEUSAGE_DATA_DIR", t.TempDir())
+	writeRecords(t, "claude", Record{V: CurrentRecordVersion + 1, Snapshot: testSnapshot("claude", "future", time.Now())})
+
+	if _, err := Read("claude"); err == nil || !strings.Contains(err.Error(), "unsupported record version") {
+		t.Fatalf("Read() error = %v", err)
+	}
+	if err := Append("claude", testSnapshot("claude", "current", time.Now())); err == nil || !strings.Contains(err.Error(), "unsupported record version") {
+		t.Fatalf("Append() error = %v", err)
+	}
+}
+
+func TestReadMigratesLegacyRecordsWithoutPrivateFields(t *testing.T) {
+	t.Setenv("VIBEUSAGE_DATA_DIR", t.TempDir())
+	legacy := testSnapshot("claude", "legacy", time.Now().Add(-2*DedupFloor))
+	legacy.Identity = &models.ProviderIdentity{Email: "private@example.com"}
+	writeRecords(t, "claude", Record{V: legacyRecordVersion, Snapshot: legacy})
+
+	records, err := Read("claude")
+	if err != nil {
+		t.Fatalf("Read() error = %v", err)
+	}
+	if got, want := len(records), 1; got != want {
+		t.Fatalf("record count = %d, want %d", got, want)
+	}
+	data, err := os.ReadFile(historyPath("claude"))
+	if err != nil {
+		t.Fatalf("reading migrated history: %v", err)
+	}
+	if strings.Contains(string(data), "private@example.com") || strings.Contains(string(data), `"identity"`) {
+		t.Errorf("migrated history retained private fields: %s", data)
+	}
+	for lineNumber, line := range bytes.Split(bytes.TrimSpace(data), []byte{'\n'}) {
+		var record Record
+		if err := json.Unmarshal(line, &record); err != nil {
+			t.Fatalf("decoding migrated line %d: %v", lineNumber+1, err)
+		}
+		if record.V != CurrentRecordVersion {
+			t.Errorf("migrated line %d version = %d, want %d", lineNumber+1, record.V, CurrentRecordVersion)
+		}
+	}
+}
+
+func TestMigrateSanitizesEveryLegacyFileAndDropsInvalidRows(t *testing.T) {
+	t.Setenv("VIBEUSAGE_DATA_DIR", t.TempDir())
+	claude := testSnapshot("claude", "legacy", time.Now().Add(-time.Hour))
+	claude.Identity = &models.ProviderIdentity{Email: "claude-private@example.com"}
+	codex := testSnapshot("wrong-provider", "invalid", time.Now().Add(-time.Hour))
+	codex.Identity = &models.ProviderIdentity{Email: "codex-private@example.com"}
+	writeRecords(t, "claude", Record{V: legacyRecordVersion, Snapshot: claude})
+	writeRecords(t, "codex", Record{V: legacyRecordVersion, Snapshot: codex})
+
+	if err := Migrate(); err != nil {
+		t.Fatalf("Migrate() error = %v", err)
+	}
+	for _, providerID := range []string{"claude", "codex"} {
+		data, err := os.ReadFile(historyPath(providerID))
+		if err != nil {
+			t.Fatalf("reading %s history: %v", providerID, err)
+		}
+		if strings.Contains(string(data), "private@example.com") || strings.Contains(string(data), `"identity"`) {
+			t.Errorf("%s history retained private fields: %s", providerID, data)
+		}
+	}
+
+	records, err := Read("claude")
+	if err != nil || len(records) != 1 || records[0].V != CurrentRecordVersion {
+		t.Errorf("migrated Claude records = %v, %v", records, err)
+	}
+	records, err = Read("codex")
+	if err != nil || len(records) != 0 {
+		t.Errorf("migrated Codex records = %v, %v; want invalid row dropped", records, err)
+	}
+}
+
+func TestReadRemovesFutureDatedLegacyPrivateRecord(t *testing.T) {
+	t.Setenv("VIBEUSAGE_DATA_DIR", t.TempDir())
+	legacy := testSnapshot("claude", "future", time.Now().Add(24*time.Hour))
+	legacy.Identity = &models.ProviderIdentity{Email: "private@example.com"}
+	writeRecords(t, "claude", Record{V: legacyRecordVersion, Snapshot: legacy})
+
+	records, err := Read("claude")
+	if err != nil {
+		t.Fatalf("Read() error = %v", err)
+	}
+	if len(records) != 0 {
+		t.Fatalf("records = %v, want empty", records)
+	}
+	data, err := os.ReadFile(historyPath("claude"))
+	if err != nil {
+		t.Fatalf("reading migrated history: %v", err)
+	}
+	if strings.Contains(string(data), "private@example.com") {
+		t.Errorf("future legacy history retained private fields: %s", data)
+	}
+}
+
+func TestAppendRepairsTornFinalLine(t *testing.T) {
+	t.Setenv("VIBEUSAGE_DATA_DIR", t.TempDir())
+	first := time.Now().Add(-2 * DedupFloor)
+	writeRecords(t, "claude", Record{V: CurrentRecordVersion, Snapshot: testSnapshot("claude", "first", first)})
+	file, err := os.OpenFile(historyPath("claude"), os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatalf("opening history tail: %v", err)
+	}
+	if _, err := file.WriteString(`{"v":1`); err != nil {
+		_ = file.Close()
+		t.Fatalf("writing torn tail: %v", err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatalf("closing torn history: %v", err)
+	}
+
+	if err := Append("claude", testSnapshot("claude", "second", time.Now())); err != nil {
+		t.Fatalf("Append() error = %v", err)
+	}
+	records, err := Read("claude")
+	if err != nil {
+		t.Fatalf("Read() error = %v", err)
+	}
+	if got, want := len(records), 2; got != want {
+		t.Fatalf("record count = %d, want %d", got, want)
+	}
+	if got := records[1].Snapshot.Periods[0].Name; got != "second" {
+		t.Errorf("last record = %q, want second", got)
+	}
+}
+
+func TestFutureStoredTimestampIsHiddenAndDoesNotBlockCurrentAppend(t *testing.T) {
+	t.Setenv("VIBEUSAGE_DATA_DIR", t.TempDir())
+	writeRecords(t, "claude", Record{
+		V:        CurrentRecordVersion,
+		Snapshot: testSnapshot("claude", "future", time.Now().Add(24*time.Hour)),
+	})
+	if err := Append("claude", testSnapshot("claude", "current", time.Now())); err != nil {
+		t.Fatalf("Append() error = %v", err)
+	}
+	records, err := Read("claude")
+	if err != nil {
+		t.Fatalf("Read() error = %v", err)
+	}
+	if got, want := len(records), 1; got != want {
+		t.Fatalf("record count = %d, want %d", got, want)
+	}
+	if got := records[0].Snapshot.Periods[0].Name; got != "current" {
+		t.Errorf("visible record = %q, want current", got)
+	}
+}
+
 func TestReadWaitsForActiveAppendLock(t *testing.T) {
 	t.Setenv("VIBEUSAGE_DATA_DIR", t.TempDir())
 	writeRecords(t, "claude", Record{
