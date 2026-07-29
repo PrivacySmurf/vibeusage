@@ -156,7 +156,7 @@ vibeusage history clear claude
 vibeusage history clear --force  # Clear all history without a prompt, for scripts
 ```
 
-Stop future recording by adding this to `config.toml`:
+History recording is enabled by default. To turn it off, set [`history.enabled`](#default-configuration) to `false` in `config.toml`:
 
 ```toml
 [history]
@@ -510,6 +510,9 @@ show_remaining = true              # Show remaining % instead of used %
 [fetch]
 max_concurrent = 5                 # Max concurrent provider fetches
 timeout = 30                       # Fetch timeout in seconds
+
+[history]
+enabled = true                     # Record usage history after live fetches
 ```
 
 ### Routing roles
