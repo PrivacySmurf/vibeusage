@@ -120,11 +120,7 @@ func runUpdate(ctx context.Context) error {
 		return nil
 	}
 
-	if apply.Pending {
-		out("✓ Updated vibeusage %s → %s; cleanup of the previous executable is pending\n", check.CurrentVersion, check.TargetVersion)
-	} else {
-		out("✓ Updated vibeusage %s → %s\n", check.CurrentVersion, check.TargetVersion)
-	}
+	out("✓ Updated vibeusage %s → %s\n", check.CurrentVersion, check.TargetVersion)
 	if err != nil {
 		return fmt.Errorf("update installed, but finalization failed: %w", err)
 	}
