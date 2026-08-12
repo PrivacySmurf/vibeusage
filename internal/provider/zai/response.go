@@ -59,6 +59,8 @@ func (q QuotaLimit) PeriodType() models.PeriodType {
 			return models.PeriodWeekly
 		}
 		return models.PeriodMonthly
+	case unitWeeks:
+		return models.PeriodWeekly
 	case unitMonths:
 		return models.PeriodMonthly
 	default:
@@ -97,11 +99,21 @@ func (q QuotaLimit) DisplayName() string {
 // periodLabel builds a period-prefixed label such as "Monthly Tools" or "Daily Quota".
 func (q QuotaLimit) periodLabel(suffix string) string {
 	switch q.Unit {
+	case unitHours:
+		if q.Number <= 24 {
+			return fmt.Sprintf("Daily %s", suffix)
+		}
+		return fmt.Sprintf("Weekly %s", suffix)
 	case unitDays:
 		if q.Number == 1 {
 			return fmt.Sprintf("Daily %s", suffix)
 		}
 		return fmt.Sprintf("%d Day %s", q.Number, suffix)
+	case unitWeeks:
+		if q.Number == 1 {
+			return fmt.Sprintf("Weekly %s", suffix)
+		}
+		return fmt.Sprintf("%d Week %s", q.Number, suffix)
 	case unitMonths:
 		if q.Number == 1 {
 			return fmt.Sprintf("Monthly %s", suffix)
@@ -121,8 +133,9 @@ const (
 // Known unit values.
 const (
 	unitHours  = 3
-	unitMonths = 5
 	unitDays   = 4 // assumed
+	unitMonths = 5
+	unitWeeks  = 6 // confirmed from API: unit=6 → weekly quota
 )
 
 // PlanName returns a human-readable plan name from the level string.
