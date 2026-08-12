@@ -31,6 +31,7 @@ import (
 	_ "github.com/joshuadavidthomas/vibeusage/internal/provider/kimicode"
 	_ "github.com/joshuadavidthomas/vibeusage/internal/provider/minimax"
 	_ "github.com/joshuadavidthomas/vibeusage/internal/provider/opencode"
+	_ "github.com/joshuadavidthomas/vibeusage/internal/provider/grok"
 	_ "github.com/joshuadavidthomas/vibeusage/internal/provider/openrouter"
 	_ "github.com/joshuadavidthomas/vibeusage/internal/provider/warp"
 	_ "github.com/joshuadavidthomas/vibeusage/internal/provider/zai"
