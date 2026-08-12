@@ -394,13 +394,14 @@ func (s *OAuthStrategy) fetchQuotaData(ctx context.Context, accessToken string) 
 }
 
 // periodTypeForTier returns the appropriate period type based on the user's plan.
-// Paid tiers (Pro/Ultra) use 5-hour sessions; free tier uses weekly cycles.
+// Paid tiers (Pro/Ultra/Antigravity product) use 5-hour sessions; free tier uses weekly cycles.
 func periodTypeForTier(tier string) models.PeriodType {
 	lower := strings.ToLower(tier)
 	switch {
 	case strings.Contains(lower, "pro"),
 		strings.Contains(lower, "ultra"),
-		strings.Contains(lower, "premium"):
+		strings.Contains(lower, "premium"),
+		strings.Contains(lower, "antigravity"):
 		return models.PeriodSession
 	default:
 		return models.PeriodWeekly
