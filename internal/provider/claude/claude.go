@@ -51,9 +51,9 @@ func (c Claude) Auth() provider.AuthFlow {
 			"  2. Open DevTools (F12 or Cmd+Option+I)\n" +
 			"  3. Go to Application → Cookies → https://claude.ai\n" +
 			"  4. Find the sessionKey cookie\n" +
-			"  5. Copy its value (starts with sk-ant-sid01-)",
-		Placeholder: "sk-ant-sid01-...",
-		Validate:    provider.ValidateAnyPrefix("sk-ant-sid01-"),
+			"  5. Copy its value (starts with sk-ant-sid01- or sk-ant-sid02-)",
+		Placeholder: "sk-ant-sid01- or sk-ant-sid02-...",
+		Validate:    provider.ValidateAnyPrefix("sk-ant-sid01-", "sk-ant-sid02-"),
 		CookieNames: []string{"sessionKey"},
 		Save:        saveClaudeCredential,
 	}

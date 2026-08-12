@@ -173,7 +173,7 @@ func (s *WebStrategy) loadSessionKey() string {
 		value = strings.TrimSpace(string(data))
 	}
 
-	if strings.HasPrefix(value, "sk-ant-sid01-") {
+	if strings.HasPrefix(value, "sk-ant-sid01-") || strings.HasPrefix(value, "sk-ant-sid02-") {
 		return value
 	}
 	return ""
