@@ -614,6 +614,70 @@ func TestDisplayDescription(t *testing.T) {
 	}
 }
 
+func TestParseRFC3339Ptr(t *testing.T) {
+	tests := []struct {
+		name    string
+		input   string
+		wantNil bool
+	}{
+		{"empty string", "", true},
+		{"whitespace", "   ", true},
+		{"invalid string", "not-a-date", true},
+		{"standard RFC3339", "2026-08-13T20:27:25Z", false},
+		{"RFC3339 with offset", "2026-08-13T20:27:25-06:00", false},
+		{"RFC3339Nano with fractional seconds", "2026-08-13T20:27:25.123456Z", false},
+		{"ISO8601 with space", "2026-08-13 20:27:25", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := ParseRFC3339Ptr(tt.input)
+			if tt.wantNil && got != nil {
+				t.Errorf("ParseRFC3339Ptr(%q) = %v, want nil", tt.input, got)
+			}
+			if !tt.wantNil && got == nil {
+				t.Errorf("ParseRFC3339Ptr(%q) = nil, want non-nil", tt.input)
+			}
+		})
+	}
+}
+
+func TestEffectiveResetTime(t *testing.T) {
+	now := time.Now()
+	future := now.Add(2 * time.Hour)
+	past1h := now.Add(-1 * time.Hour)
+
+	t.Run("nil reset returns nil", func(t *testing.T) {
+		p := UsagePeriod{}
+		if got := p.EffectiveResetTime(); got != nil {
+			t.Errorf("EffectiveResetTime() = %v, want nil", got)
+		}
+	})
+
+	t.Run("future reset returned as is", func(t *testing.T) {
+		p := UsagePeriod{ResetsAt: &future, PeriodType: PeriodSession}
+		got := p.EffectiveResetTime()
+		if got == nil || !got.Equal(future) {
+			t.Errorf("EffectiveResetTime() = %v, want %v", got, future)
+		}
+	})
+
+	t.Run("past reset for session period advances into future", func(t *testing.T) {
+		p := UsagePeriod{ResetsAt: &past1h, PeriodType: PeriodSession} // 5h period
+		got := p.EffectiveResetTime()
+		if got == nil {
+			t.Fatal("EffectiveResetTime() = nil, want non-nil")
+		}
+		if !got.After(now) {
+			t.Errorf("EffectiveResetTime() = %v, expected time after %v", got, now)
+		}
+		want := past1h.Add(5 * time.Hour)
+		if !got.Equal(want) {
+			t.Errorf("EffectiveResetTime() = %v, want %v", got, want)
+		}
+	})
+}
+
 func timePtr(t time.Time) *time.Time {
 	return &t
 }

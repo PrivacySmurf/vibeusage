@@ -49,6 +49,30 @@ func (p UsagePeriod) Remaining() int {
 	return 100 - p.Utilization
 }
 
+// EffectiveResetTime returns the reset timestamp for this period. If the stored
+// ResetsAt timestamp is in the past and the period type has a recurring duration,
+// it advances the timestamp in cycle increments until it reaches the active/next reset boundary.
+func (p UsagePeriod) EffectiveResetTime() *time.Time {
+	if p.ResetsAt == nil {
+		return nil
+	}
+	now := time.Now()
+	resetsAt := *p.ResetsAt
+	if resetsAt.Before(now) {
+		switch p.PeriodType {
+		case PeriodSession, PeriodDaily, PeriodWeekly, PeriodMonthly:
+			hours := p.PeriodType.Hours()
+			if hours > 0 {
+				dur := time.Duration(hours * float64(time.Hour))
+				for !resetsAt.After(now) {
+					resetsAt = resetsAt.Add(dur)
+				}
+			}
+		}
+	}
+	return &resetsAt
+}
+
 func (p UsagePeriod) ElapsedRatio() *float64 {
 	if p.ResetsAt == nil {
 		return nil
@@ -72,10 +96,11 @@ func (p UsagePeriod) PaceRatio() *float64 {
 }
 
 func (p UsagePeriod) TimeUntilReset() *time.Duration {
-	if p.ResetsAt == nil {
+	eff := p.EffectiveResetTime()
+	if eff == nil {
 		return nil
 	}
-	d := time.Until(*p.ResetsAt)
+	d := time.Until(*eff)
 	if d < 0 {
 		d = 0
 	}

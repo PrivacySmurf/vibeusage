@@ -641,10 +641,7 @@ func parseAGYCLIResponse(data []byte) *models.UsageSnapshot {
 
 			var resetTime *time.Time
 			if bucket.ResetTime != "" {
-				if t, err := time.Parse(time.RFC3339, bucket.ResetTime); err == nil {
-					utc := t.UTC()
-					resetTime = &utc
-				}
+				resetTime = models.ParseRFC3339Ptr(bucket.ResetTime)
 			}
 
 			periods = append(periods, models.UsagePeriod{
