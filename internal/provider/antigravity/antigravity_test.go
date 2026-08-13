@@ -29,8 +29,8 @@ func TestFetchStrategies(t *testing.T) {
 	a := Antigravity{}
 	strategies := a.FetchStrategies()
 
-	if len(strategies) != 1 {
-		t.Fatalf("len(strategies) = %d, want 1", len(strategies))
+	if len(strategies) != 2 {
+		t.Fatalf("len(strategies) = %d, want 2", len(strategies))
 	}
 }
 
@@ -527,3 +527,136 @@ func TestFetch_FailsClosedForSourceFileWhenRefreshNeeded(t *testing.T) {
 		t.Errorf("Fetch error = %q, want guidance to use the IDE", res.Error)
 	}
 }
+
+func TestParseAntigravityCredentials_AgyTokenFormat(t *testing.T) {
+	raw := `{
+		"token": {
+			"access_token": "agy-access-tok",
+			"token_type": "Bearer",
+			"refresh_token": "agy-refresh-tok",
+			"expiry": "2099-01-01T00:00:00Z"
+		},
+		"auth_method": "oauth"
+	}`
+
+	creds := parseAntigravityCredentials([]byte(raw))
+	if creds == nil {
+		t.Fatal("parseAntigravityCredentials returned nil for agy token format")
+	}
+	if creds.AccessToken != "agy-access-tok" {
+		t.Errorf("access_token = %q, want agy-access-tok", creds.AccessToken)
+	}
+	if creds.RefreshToken != "agy-refresh-tok" {
+		t.Errorf("refresh_token = %q, want agy-refresh-tok", creds.RefreshToken)
+	}
+	if creds.ExpiresAt != "2099-01-01T00:00:00Z" {
+		t.Errorf("expires_at = %q, want 2099-01-01T00:00:00Z", creds.ExpiresAt)
+	}
+}
+
+func TestLoadCredentials_AgyCLISource(t *testing.T) {
+	applyAntigravityTestEnv(t)
+	home, _ := os.UserHomeDir()
+	dir := filepath.Join(home, ".gemini", "antigravity-cli")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	content := `{
+		"token": {
+			"access_token": "agy-cli-tok",
+			"refresh_token": "agy-cli-ref",
+			"expiry": "2099-01-01T00:00:00Z"
+		},
+		"auth_method": "oauth"
+	}`
+	if err := os.WriteFile(filepath.Join(dir, "antigravity-oauth-token"), []byte(content), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	s := &OAuthStrategy{}
+	creds, source := s.loadCredentials(context.Background())
+	if creds == nil {
+		t.Fatal("loadCredentials() returned nil creds")
+	}
+	if source != sourceFile {
+		t.Errorf("source = %v, want sourceFile", source)
+	}
+	if creds.AccessToken != "agy-cli-tok" {
+		t.Errorf("access_token = %q, want agy-cli-tok", creds.AccessToken)
+	}
+}
+
+func TestParseAGYCLIResponse(t *testing.T) {
+	jsonInput := `{
+		"status": "SUCCESS",
+		"command": {
+			"name": "usage",
+			"data": {
+				"groups": [
+					{
+						"name": "Gemini Models",
+						"description": "Models within this group: Gemini Flash, Gemini Pro",
+						"buckets": [
+							{
+								"id": "gemini-weekly",
+								"name": "Weekly Limit Remaining",
+								"window": "weekly",
+								"remaining_fraction": 0.9706,
+								"reset_time": "2026-08-13T20:27:25Z"
+							},
+							{
+								"id": "gemini-5h",
+								"name": "Five Hour Limit Remaining",
+								"window": "5h",
+								"remaining_fraction": 0.9648,
+								"reset_time": "2026-08-13T04:54:50Z"
+							}
+						]
+					}
+				]
+			}
+		}
+	}`
+
+	snapshot := parseAGYCLIResponse([]byte(jsonInput))
+	if snapshot == nil {
+		t.Fatal("expected non-nil snapshot")
+	}
+	if snapshot.Provider != "antigravity" {
+		t.Errorf("provider = %q, want %q", snapshot.Provider, "antigravity")
+	}
+	if snapshot.Source != "cli" {
+		t.Errorf("source = %q, want %q", snapshot.Source, "cli")
+	}
+
+	// 2 bucket periods (Weekly + Session)
+	if len(snapshot.Periods) != 2 {
+		t.Fatalf("len(periods) = %d, want 2", len(snapshot.Periods))
+	}
+
+	// Bucket 1 (Weekly)
+	p1 := snapshot.Periods[0]
+	if p1.Name != "Gemini Models (Weekly)" {
+		t.Errorf("period[0] name = %q, want %q", p1.Name, "Gemini Models (Weekly)")
+	}
+	if p1.PeriodType != models.PeriodWeekly {
+		t.Errorf("period[0] period_type = %q, want %q", p1.PeriodType, models.PeriodWeekly)
+	}
+	if p1.Utilization != 3 {
+		t.Errorf("period[0] utilization = %d, want 3", p1.Utilization)
+	}
+
+	// Bucket 2 (Session 5h)
+	p2 := snapshot.Periods[1]
+	if p2.Name != "Gemini Models (Session)" {
+		t.Errorf("period[1] name = %q, want %q", p2.Name, "Gemini Models (Session)")
+	}
+	if p2.PeriodType != models.PeriodSession {
+		t.Errorf("period[1] period_type = %q, want %q", p2.PeriodType, models.PeriodSession)
+	}
+	if p2.Utilization != 4 {
+		t.Errorf("period[1] utilization = %d, want 4", p2.Utilization)
+	}
+}
+
+

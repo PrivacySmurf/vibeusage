@@ -118,7 +118,14 @@ func formatSubPeriodName(p *models.UsagePeriod, sectionHeader string) string {
 		if strings.Contains(name, "(") && strings.Contains(name, ")") {
 			start := strings.Index(name, "(") + 1
 			end := strings.Index(name, ")")
-			return "  " + name[start:end]
+			sub := name[start:end]
+			if strings.EqualFold(sub, sectionHeader) || strings.EqualFold(sub, "weekly") || strings.EqualFold(sub, "session") || strings.EqualFold(sub, "5h") {
+				prefix := strings.TrimSpace(name[:start-1])
+				if prefix != "" {
+					return "  " + prefix
+				}
+			}
+			return "  " + sub
 		}
 		if name == sectionHeader {
 			return "  All Models"

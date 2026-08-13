@@ -458,10 +458,18 @@ func rateLimitPeriods(rl *RateLimits, model, primaryName, secondaryName string) 
 	var periods []models.UsagePeriod
 
 	if primary := rl.EffectivePrimary(); primary != nil {
+		periodType := models.PeriodSession
+		name := primaryName
+		if isWeeklyWindow(primary) {
+			periodType = models.PeriodWeekly
+			if name == "Session" {
+				name = "Weekly"
+			}
+		}
 		p := models.UsagePeriod{
-			Name:        primaryName,
+			Name:        name,
 			Utilization: int(primary.UsedPercent),
-			PeriodType:  models.PeriodSession,
+			PeriodType:  periodType,
 			Model:       model,
 		}
 		if ts := primary.EffectiveResetTimestamp(); ts > 0 {
@@ -472,10 +480,18 @@ func rateLimitPeriods(rl *RateLimits, model, primaryName, secondaryName string) 
 	}
 
 	if secondary := rl.EffectiveSecondary(); secondary != nil {
+		periodType := models.PeriodWeekly
+		name := secondaryName
+		if isSessionWindow(secondary) {
+			periodType = models.PeriodSession
+			if name == "Weekly" || name == "Code Review Weekly" {
+				name = "Session"
+			}
+		}
 		p := models.UsagePeriod{
-			Name:        secondaryName,
+			Name:        name,
 			Utilization: int(secondary.UsedPercent),
-			PeriodType:  models.PeriodWeekly,
+			PeriodType:  periodType,
 			Model:       model,
 		}
 		if ts := secondary.EffectiveResetTimestamp(); ts > 0 {
@@ -486,4 +502,24 @@ func rateLimitPeriods(rl *RateLimits, model, primaryName, secondaryName string) 
 	}
 
 	return periods
+}
+
+func isWeeklyWindow(w *RateWindow) bool {
+	if w.LimitWindowSeconds >= 86400*3 {
+		return true
+	}
+	if w.ResetAfterSeconds >= 86400*2 {
+		return true
+	}
+	return false
+}
+
+func isSessionWindow(w *RateWindow) bool {
+	if w.LimitWindowSeconds > 0 && w.LimitWindowSeconds <= 86400 {
+		return true
+	}
+	if w.ResetAfterSeconds > 0 && w.ResetAfterSeconds <= 86400 {
+		return true
+	}
+	return false
 }

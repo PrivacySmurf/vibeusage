@@ -137,6 +137,35 @@ func TestParseUsageResponse_AlternateKeys(t *testing.T) {
 	}
 }
 
+func TestParseUsageResponse_WeeklyPrimaryWindow(t *testing.T) {
+	resp := UsageResponse{
+		RateLimits: &RateLimits{
+			Primary: &RateWindow{
+				UsedPercent:        16.0,
+				LimitWindowSeconds: 604800,
+				ResetTimestamp:     1740000000,
+			},
+		},
+	}
+
+	s := OAuthStrategy{}
+	snapshot := s.parseTypedUsageResponse(resp)
+
+	if snapshot == nil {
+		t.Fatal("expected non-nil snapshot")
+	}
+	if len(snapshot.Periods) != 1 {
+		t.Fatalf("len(periods) = %d, want 1", len(snapshot.Periods))
+	}
+	p := snapshot.Periods[0]
+	if p.Name != "Weekly" {
+		t.Errorf("period name = %q, want %q", p.Name, "Weekly")
+	}
+	if p.PeriodType != models.PeriodWeekly {
+		t.Errorf("period_type = %q, want %q", p.PeriodType, models.PeriodWeekly)
+	}
+}
+
 func TestParseUsageResponse_NoRateLimits(t *testing.T) {
 	resp := UsageResponse{
 		PlanType: "free",

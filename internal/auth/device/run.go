@@ -142,9 +142,12 @@ func Run(ctx context.Context, w io.Writer, quiet bool, cfg Config) (bool, error)
 	}
 
 	// Build token params with device code.
-	tokenParams := make(map[string]string, len(cfg.TokenParams)+1)
+	tokenParams := make(map[string]string, len(cfg.TokenParams)+2)
 	for k, v := range cfg.TokenParams {
 		tokenParams[k] = v
+	}
+	if _, ok := tokenParams["grant_type"]; !ok {
+		tokenParams["grant_type"] = "urn:ietf:params:oauth:grant-type:device_code"
 	}
 	tokenParams["device_code"] = deviceCode
 

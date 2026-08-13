@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -34,7 +35,10 @@ func (a Antigravity) Meta() provider.Metadata {
 
 func (a Antigravity) CredentialSources() provider.CredentialInfo {
 	return provider.CredentialInfo{
-		CLIPaths:      []string{"~/.config/Antigravity/credentials.json"},
+		CLIPaths: []string{
+			"~/.gemini/antigravity-cli/antigravity-oauth-token",
+			"~/.config/Antigravity/credentials.json",
+		},
 		CheckStrategy: true,
 	}
 }
@@ -42,6 +46,7 @@ func (a Antigravity) CredentialSources() provider.CredentialInfo {
 func (a Antigravity) FetchStrategies() []fetch.Strategy {
 	timeout := config.Get().Fetch.Timeout
 	return []fetch.Strategy{
+		&AGYCLIStrategy{Timeout: timeout},
 		&OAuthStrategy{HTTPTimeout: timeout},
 	}
 }
@@ -95,6 +100,9 @@ func (s *OAuthStrategy) IsAvailable() bool {
 
 func (s *OAuthStrategy) externalPaths() []string {
 	var paths []string
+	if home, err := os.UserHomeDir(); err == nil {
+		paths = append(paths, filepath.Join(home, ".gemini", "antigravity-cli", "antigravity-oauth-token"))
+	}
 	if configDir, err := os.UserConfigDir(); err == nil {
 		paths = append(paths, filepath.Join(configDir, "Antigravity", "credentials.json"))
 	}
@@ -274,7 +282,34 @@ func saveAntigravityCredentials(c *oauth.Credentials) error {
 	return config.WriteCredential("antigravity", "oauth", content)
 }
 
+type agyTokenFile struct {
+	Token struct {
+		AccessToken  string `json:"access_token,omitempty"`
+		RefreshToken string `json:"refresh_token,omitempty"`
+		ExpiresAt    string `json:"expires_at,omitempty"`
+		Expiry       string `json:"expiry,omitempty"`
+		ExpiryDate   any    `json:"expiry_date,omitempty"`
+	} `json:"token"`
+}
+
 func parseAntigravityCredentials(data []byte) *oauth.Credentials {
+	// Try the agy CLI credential format (~/.gemini/antigravity-cli/antigravity-oauth-token)
+	var agyCreds agyTokenFile
+	if err := json.Unmarshal(data, &agyCreds); err == nil && agyCreds.Token.AccessToken != "" {
+		exp := agyCreds.Token.ExpiresAt
+		if exp == "" {
+			exp = agyCreds.Token.Expiry
+		}
+		if exp == "" {
+			exp = google.ParseExpiryDate(agyCreds.Token.ExpiryDate)
+		}
+		return &oauth.Credentials{
+			AccessToken:  agyCreds.Token.AccessToken,
+			RefreshToken: agyCreds.Token.RefreshToken,
+			ExpiresAt:    exp,
+		}
+	}
+
 	// Try the Antigravity credential format
 	var agCreds AntigravityCredentials
 	if err := json.Unmarshal(data, &agCreds); err == nil {
@@ -400,8 +435,7 @@ func periodTypeForTier(tier string) models.PeriodType {
 	switch {
 	case strings.Contains(lower, "pro"),
 		strings.Contains(lower, "ultra"),
-		strings.Contains(lower, "premium"),
-		strings.Contains(lower, "antigravity"):
+		strings.Contains(lower, "premium"):
 		return models.PeriodSession
 	default:
 		return models.PeriodWeekly
@@ -515,3 +549,124 @@ func titleCase(s string) string {
 	}
 	return strings.Join(words, " ")
 }
+
+// AGYCLIStrategy fetches Antigravity usage by invoking the agy CLI tool directly.
+type AGYCLIStrategy struct {
+	Timeout float64
+}
+
+func (s *AGYCLIStrategy) IsAvailable() bool {
+	_, err := exec.LookPath("agy")
+	return err == nil
+}
+
+func (s *AGYCLIStrategy) Fetch(ctx context.Context) (fetch.FetchResult, error) {
+	if !s.IsAvailable() {
+		return fetch.ResultFail("agy CLI binary not found in PATH"), nil
+	}
+
+	execCtx := ctx
+	if s.Timeout > 0 {
+		var cancel context.CancelFunc
+		execCtx, cancel = context.WithTimeout(ctx, time.Duration(s.Timeout*float64(time.Second)))
+		defer cancel()
+	}
+
+	cmd := exec.CommandContext(execCtx, "agy", "-p", "/usage", "--output-format", "json")
+	out, err := cmd.Output()
+	if err != nil {
+		return fetch.ResultFail(fmt.Sprintf("failed to run agy CLI: %v", err)), nil
+	}
+
+	snapshot := parseAGYCLIResponse(out)
+	if snapshot == nil {
+		return fetch.ResultFail("failed to parse agy CLI output"), nil
+	}
+
+	return fetch.ResultOK(*snapshot), nil
+}
+
+type agyCLIOutput struct {
+	Status  string `json:"status"`
+	Command struct {
+		Name string `json:"name"`
+		Data struct {
+			Groups []agyCLIGroup `json:"groups"`
+		} `json:"data"`
+	} `json:"command"`
+}
+
+type agyCLIGroup struct {
+	Name        string         `json:"name"`
+	Description string         `json:"description"`
+	Buckets     []agyCLIBucket `json:"buckets"`
+}
+
+type agyCLIBucket struct {
+	ID                string  `json:"id"`
+	Name              string  `json:"name"`
+	Description       string  `json:"description"`
+	Window            string  `json:"window"`
+	RemainingFraction float64 `json:"remaining_fraction"`
+	ResetTime         string  `json:"reset_time"`
+}
+
+func parseAGYCLIResponse(data []byte) *models.UsageSnapshot {
+	var resp agyCLIOutput
+	if err := json.Unmarshal(data, &resp); err != nil {
+		return nil
+	}
+
+	if len(resp.Command.Data.Groups) == 0 {
+		return nil
+	}
+
+	var periods []models.UsagePeriod
+
+	for _, group := range resp.Command.Data.Groups {
+		for _, bucket := range group.Buckets {
+			periodType := models.PeriodSession
+			nameQualifier := " (Session)"
+			if bucket.Window == "weekly" {
+				periodType = models.PeriodWeekly
+				nameQualifier = " (Weekly)"
+			}
+
+			utilization := int(math.Round((1.0 - bucket.RemainingFraction) * 100.0))
+			if utilization < 0 {
+				utilization = 0
+			} else if utilization > 100 {
+				utilization = 100
+			}
+
+			var resetTime *time.Time
+			if bucket.ResetTime != "" {
+				if t, err := time.Parse(time.RFC3339, bucket.ResetTime); err == nil {
+					utc := t.UTC()
+					resetTime = &utc
+				}
+			}
+
+			periods = append(periods, models.UsagePeriod{
+				Name:        group.Name + nameQualifier,
+				Utilization: utilization,
+				PeriodType:  periodType,
+				ResetsAt:    resetTime,
+				Model:       "",
+			})
+		}
+	}
+
+	if len(periods) == 0 {
+		return nil
+	}
+
+	now := time.Now().UTC()
+	return &models.UsageSnapshot{
+		Provider:  "antigravity",
+		FetchedAt: now,
+		Periods:   periods,
+		Source:    "cli",
+	}
+}
+

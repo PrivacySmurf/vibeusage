@@ -4,9 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
+	"github.com/joshuadavidthomas/vibeusage/internal/auth/device"
+	"github.com/joshuadavidthomas/vibeusage/internal/auth/oauth"
 	"github.com/joshuadavidthomas/vibeusage/internal/config"
 	"github.com/joshuadavidthomas/vibeusage/internal/fetch"
 	"github.com/joshuadavidthomas/vibeusage/internal/httpclient"
@@ -28,40 +32,79 @@ func (g Grok) Meta() provider.Metadata {
 
 func (g Grok) CredentialSources() provider.CredentialInfo {
 	return provider.CredentialInfo{
-		EnvVars: []string{"GROK_SESSION_COOKIE"},
+		EnvVars:  []string{"GROK_OAUTH_TOKEN", "GROK_SESSION_COOKIE"},
+		CLIPaths: externalOAuthPaths(),
 	}
 }
 
 func (g Grok) FetchStrategies() []fetch.Strategy {
 	timeout := config.Get().Fetch.Timeout
-	return []fetch.Strategy{&CookieStrategy{HTTPTimeout: timeout}}
+	return []fetch.Strategy{
+		&OAuthStrategy{HTTPTimeout: timeout},
+		&CookieStrategy{HTTPTimeout: timeout},
+	}
 }
 
 func (g Grok) FetchStatus(_ context.Context) models.ProviderStatus {
 	return models.ProviderStatus{Level: models.StatusUnknown}
 }
 
-func (g Grok) Auth() provider.AuthFlow {
-	return provider.ManualKeyAuthFlow{
-		Instructions: "Get your Grok session cookie:\n" +
-			"  1. Open https://grok.com in your browser and sign in\n" +
-			"  2. Open DevTools (F12 or Cmd+Option+I)\n" +
-			"  3. Go to Application → Cookies → https://grok.com\n" +
-			"  4. Find the 'sct' cookie (or 'auth_token' if sct is absent)\n" +
-			"  5. Copy its value",
-		Placeholder: "paste cookie value here",
-		Validate:    provider.ValidateNotEmpty,
-		ProviderID:  "grok",
-		CredType:    "session",
-		JSONKey:     "session_cookie",
-		Save:        saveGrokCredential,
+// AcceptCredential stores a raw credential (session cookie or OAuth token).
+func (g Grok) AcceptCredential(credential string) error {
+	credential = strings.TrimSpace(credential)
+	if credential == "" {
+		return fmt.Errorf("credential cannot be empty")
 	}
+
+	if strings.HasPrefix(credential, "{") || strings.HasPrefix(credential, "ey") {
+		var creds oauth.Credentials
+		if strings.HasPrefix(credential, "{") {
+			_ = json.Unmarshal([]byte(credential), &creds)
+		}
+		if creds.AccessToken == "" && strings.HasPrefix(credential, "ey") {
+			creds.AccessToken = credential
+		}
+		if creds.AccessToken != "" {
+			bytes, err := json.Marshal(creds)
+			if err != nil {
+				return fmt.Errorf("marshal grok oauth credentials: %w", err)
+			}
+			return config.WriteCredential("grok", "oauth", bytes)
+		}
+	}
+
+	content, err := json.Marshal(map[string]string{"session_cookie": credential})
+	if err != nil {
+		return fmt.Errorf("marshal grok session cookie: %w", err)
+	}
+	return config.WriteCredential("grok", "session", content)
 }
 
-func saveGrokCredential(value string) error {
-	value = strings.TrimSpace(value)
-	content, _ := json.Marshal(map[string]string{"session_cookie": value})
-	return config.WriteCredential("grok", "session", content)
+func (g Grok) Auth() provider.AuthFlow {
+	return provider.DeviceAuthFlow{
+		Config: device.Config{
+			DeviceCodeURL: oauthDeviceCodeURL,
+			DeviceCodeParams: map[string]string{
+				"client_id": clientID,
+				"scope":     "openid profile email offline_access grok-cli:access api:access conversations:read conversations:write",
+				"referrer":  "grok-build",
+			},
+			TokenURL: oauthTokenURL,
+			TokenParams: map[string]string{
+				"client_id":  clientID,
+				"grant_type": "urn:ietf:params:oauth:grant-type:device_code",
+			},
+			HTTPOptions: []httpclient.RequestOption{
+				httpclient.WithHeader("x-grok-client-version", "grld-macos-oauth"),
+				httpclient.WithHeader("x-grok-client-surface", "ui"),
+				httpclient.WithHeader("Accept", "application/json"),
+			},
+			HTTPTimeout:     config.Get().Fetch.Timeout,
+			ProviderID:      "grok",
+			CredType:        "oauth",
+			ShowRefreshHint: true,
+		},
+	}
 }
 
 func init() {
@@ -69,15 +112,189 @@ func init() {
 }
 
 const (
-	rateLimitsURL = "https://grok.com/rest/rate-limits"
+	rateLimitsURL      = "https://grok.com/rest/rate-limits"
+	billingURL         = "https://cli-chat-proxy.grok.com/v1/billing?format=credits"
+	oauthTokenURL      = "https://auth.x.ai/oauth2/token"
+	oauthDeviceCodeURL = "https://auth.x.ai/oauth2/device/code"
+	clientID           = "b1a00492-073a-47ea-816f-4c329264a828"
 )
 
-// grokSessionCred loads the Grok session cookie from credentials or env.
+var grokOAuthCred = provider.APIKeySource{
+	EnvVars:    []string{"GROK_OAUTH_TOKEN"},
+	ProviderID: "grok",
+	CredType:   "oauth",
+	JSONKeys:   []string{"access_token", "accessToken", "token"},
+}
+
 var grokSessionCred = provider.APIKeySource{
 	EnvVars:    []string{"GROK_SESSION_COOKIE"},
 	ProviderID: "grok",
 	CredType:   "session",
 	JSONKeys:   []string{"session_cookie"},
+}
+
+func externalOAuthPaths() []string {
+	var paths []string
+	if home, err := os.UserHomeDir(); err == nil {
+		paths = append(paths, filepath.Join(home, "Library", "Application Support", "GRLD", "oidc.json"))
+		paths = append(paths, filepath.Join(home, ".config", "grok", "oauth.json"))
+		paths = append(paths, filepath.Join(home, ".grok", "oauth.json"))
+	}
+	return paths
+}
+
+// OAuthStrategy fetches Grok usage via the OAuth billing API endpoint.
+type OAuthStrategy struct {
+	HTTPTimeout float64
+}
+
+func (s *OAuthStrategy) IsAvailable() bool {
+	if grokOAuthCred.Load() != "" {
+		return true
+	}
+	for _, p := range externalOAuthPaths() {
+		if fileExists(p) {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *OAuthStrategy) Fetch(ctx context.Context) (fetch.FetchResult, error) {
+	token, sourceName, err := loadOrRefreshOAuthToken(ctx, s.HTTPTimeout)
+	if err != nil || token == "" {
+		return fetch.ResultFail("Grok: no valid OAuth token found"), nil
+	}
+
+	client := httpclient.NewFromConfig(s.HTTPTimeout)
+	var billingResp BillingResponse
+	resp, err := client.GetJSONCtx(ctx, billingURL, &billingResp,
+		httpclient.WithHeader("Authorization", "Bearer "+token),
+		httpclient.WithHeader("X-XAI-Token-Auth", "xai-grok-cli"),
+		httpclient.WithHeader("Accept", "application/json"),
+		httpclient.WithHeader("User-Agent", "GRLD-macOS/oauth"),
+	)
+	if err != nil {
+		return fetch.ResultFail(fmt.Sprintf("Grok billing fetch failed: %v", err)), nil
+	}
+	if resp.StatusCode == 401 || resp.StatusCode == 403 {
+		return fetch.ResultFatal("Grok: unauthorized — OAuth token expired or invalid"), nil
+	}
+	if resp.StatusCode != 200 || resp.JSONErr != nil {
+		return fetch.ResultFail(fmt.Sprintf("Grok billing returned HTTP %d", resp.StatusCode)), nil
+	}
+
+	periods, err := parseBillingResponse(resp.Body)
+	if err != nil || len(periods) == 0 {
+		return fetch.ResultFail("Grok: could not parse billing response"), nil
+	}
+
+	snapshot := models.UsageSnapshot{
+		Provider:  "grok",
+		FetchedAt: time.Now().UTC(),
+		Periods:   periods,
+		Source:    sourceName,
+	}
+	return fetch.ResultOK(snapshot), nil
+}
+
+func loadOrRefreshOAuthToken(ctx context.Context, timeout float64) (string, string, error) {
+	// 1. Check stored vibeusage OAuth credentials
+	data, _ := config.ReadCredential("grok", "oauth")
+	if len(data) > 0 {
+		var creds oauth.Credentials
+		if err := json.Unmarshal(data, &creds); err == nil && creds.AccessToken != "" {
+			if creds.NeedsRefresh() && creds.RefreshToken != "" {
+				refreshed := oauth.Refresh(ctx, creds.RefreshToken, oauth.RefreshConfig{
+					TokenURL: oauthTokenURL,
+					FormFields: map[string]string{
+						"client_id": clientID,
+					},
+					Headers: []httpclient.RequestOption{
+						httpclient.WithHeader("x-grok-client-version", "grld-macos-oauth"),
+						httpclient.WithHeader("x-grok-client-surface", "ui"),
+						httpclient.WithHeader("Accept", "application/json"),
+					},
+					Save: func(c *oauth.Credentials) error {
+						bytes, err := json.Marshal(c)
+						if err != nil {
+							return err
+						}
+						return config.WriteCredential("grok", "oauth", bytes)
+					},
+					HTTPTimeout: timeout,
+				})
+				if refreshed != nil {
+					return refreshed.AccessToken, "oauth", nil
+				}
+			}
+			return creds.AccessToken, "oauth", nil
+		}
+	}
+
+	// 2. Check GROK_OAUTH_TOKEN env var
+	if envToken := strings.TrimSpace(os.Getenv("GROK_OAUTH_TOKEN")); envToken != "" {
+		return envToken, "env", nil
+	}
+
+	// 3. Check external CLI / GRLD files
+	for _, p := range externalOAuthPaths() {
+		b, err := os.ReadFile(p)
+		if err != nil {
+			continue
+		}
+		var grldStruct struct {
+			AccessToken  string `json:"accessToken"`
+			RefreshToken string `json:"refreshToken"`
+			ExpiresAt    string `json:"expiresAt"`
+			Token        string `json:"access_token"`
+		}
+		if err := json.Unmarshal(b, &grldStruct); err == nil {
+			tok := grldStruct.AccessToken
+			if tok == "" {
+				tok = grldStruct.Token
+			}
+			if tok != "" {
+				creds := oauth.Credentials{
+					AccessToken:  tok,
+					RefreshToken: grldStruct.RefreshToken,
+					ExpiresAt:    grldStruct.ExpiresAt,
+				}
+				if creds.NeedsRefresh() && creds.RefreshToken != "" {
+					refreshed := oauth.Refresh(ctx, creds.RefreshToken, oauth.RefreshConfig{
+						TokenURL: oauthTokenURL,
+						FormFields: map[string]string{
+							"client_id": clientID,
+						},
+						Headers: []httpclient.RequestOption{
+							httpclient.WithHeader("x-grok-client-version", "grld-macos-oauth"),
+							httpclient.WithHeader("x-grok-client-surface", "ui"),
+							httpclient.WithHeader("Accept", "application/json"),
+						},
+						Save: func(c *oauth.Credentials) error {
+							bytes, err := json.Marshal(c)
+							if err != nil {
+								return err
+							}
+							return config.WriteCredential("grok", "oauth", bytes)
+						},
+						HTTPTimeout: timeout,
+					})
+					if refreshed != nil {
+						return refreshed.AccessToken, "grld", nil
+					}
+				}
+				return tok, "grld", nil
+			}
+		}
+	}
+
+	return "", "", nil
+}
+
+func fileExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
 }
 
 // CookieStrategy fetches Grok usage using a browser session cookie.
@@ -212,3 +429,4 @@ func inferPeriodType(windowType string, windowSecs int) models.PeriodType {
 		return models.PeriodMonthly
 	}
 }
+
