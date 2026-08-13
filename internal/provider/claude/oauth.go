@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"os/user"
 	"path/filepath"
 	"time"
 
@@ -34,6 +35,13 @@ const (
 var (
 	oauthUsageEndpoint   = oauthUsageURL
 	oauthAccountEndpoint = oauthAccountURL
+	currentUsername      = func() (string, error) {
+		current, err := user.Current()
+		if err != nil {
+			return "", err
+		}
+		return current.Username, nil
+	}
 )
 
 var readKeychainSecret = keychain.ReadGenericPassword
@@ -259,21 +267,25 @@ func parseClaudeCredentials(data []byte) *oauth.Credentials {
 }
 
 func (s *OAuthStrategy) loadKeychainCredentials() *oauth.Credentials {
-	secret, err := readKeychainSecret(claudeKeychainSecret, "")
+	if username, err := currentUsername(); err == nil && username != "" {
+		if creds := loadClaudeKeychainAccount(username); creds != nil {
+			return creds
+		}
+	}
+
+	// Older Claude Code versions used an unscoped Keychain item. Keep it as a
+	// schema-validated fallback, but prefer the current-user account because
+	// unrelated MCP records can share the same Keychain service name.
+	return loadClaudeKeychainAccount("")
+}
+
+func loadClaudeKeychainAccount(account string) *oauth.Credentials {
+	secret, err := readKeychainSecret(claudeKeychainSecret, account)
 	if err != nil || secret == "" {
 		return nil
 	}
 
-	var cliCreds ClaudeCLICredentials
-	if err := json.Unmarshal([]byte(secret), &cliCreds); err != nil || cliCreds.ClaudeAiOauth == nil {
-		return nil
-	}
-
-	creds := cliCreds.ClaudeAiOauth.ToOAuthCredentials()
-	if creds.AccessToken == "" {
-		return nil
-	}
-	return &creds
+	return parseClaudeCredentials([]byte(secret))
 }
 
 func (s *OAuthStrategy) parseOAuthUsageResponse(resp OAuthUsageResponse) *models.UsageSnapshot {

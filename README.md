@@ -319,6 +319,20 @@ If you have the Amp CLI installed, vibeusage reads credentials from `~/.local/sh
 vibeusage auth amp
 ```
 
+#### Alibaba Cloud Model Studio Team Plan
+
+[Model Studio](https://modelstudio.console.alibabacloud.com) — Alibaba Cloud's Bailian console. Reports Singapore Team/Enterprise Token Plan usage and expiration.
+
+On macOS, vibeusage automatically imports the authenticated Alibaba cookies from Chrome, Chromium, or the Codex in-app browser. Sign in to the [Singapore Team Token Plan page](https://modelstudio.console.alibabacloud.com/ap-southeast-1/?tab=plan#/efm/subscription/token-plan/enterprise), then run:
+
+```bash
+vibeusage usage modelstudio
+```
+
+Browser imports are scoped to the Model Studio console host and happen only while fetching this provider. Chrome/Chromium may ask for access to its Safe Storage Keychain item. When an imported session expires, sign in again in the same browser and retry; vibeusage re-imports it automatically.
+
+For unsupported platforms or browser profiles, `vibeusage auth modelstudio` accepts the complete `Cookie` request-header value as a manual fallback. `MODELSTUDIO_COOKIE` remains an explicit override and is never replaced automatically.
+
 #### Claude Code Pro/Max
 
 > [!IMPORTANT]

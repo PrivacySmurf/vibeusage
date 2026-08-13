@@ -448,15 +448,21 @@ func TestOAuthCredentials_NeedsRefresh(t *testing.T) {
 }
 
 func TestLoadKeychainCredentials(t *testing.T) {
-	old := readKeychainSecret
-	defer func() { readKeychainSecret = old }()
+	oldRead := readKeychainSecret
+	oldUsername := currentUsername
+	defer func() {
+		readKeychainSecret = oldRead
+		currentUsername = oldUsername
+	}()
+
+	currentUsername = func() (string, error) { return "test-user", nil }
 
 	readKeychainSecret = func(service, account string) (string, error) {
 		if service != claudeKeychainSecret {
 			t.Fatalf("service = %q, want %q", service, claudeKeychainSecret)
 		}
-		if account != "" {
-			t.Fatalf("account = %q, want empty", account)
+		if account != "test-user" {
+			t.Fatalf("account = %q, want test-user", account)
 		}
 		return `{"claudeAiOauth":{"accessToken":"tok","refreshToken":"ref","expiresAt":4102444800000}}`, nil
 	}
@@ -471,6 +477,73 @@ func TestLoadKeychainCredentials(t *testing.T) {
 	}
 	if creds.RefreshToken != "ref" {
 		t.Errorf("refresh_token = %q, want ref", creds.RefreshToken)
+	}
+}
+
+func TestLoadKeychainCredentials_PrefersCurrentUserOverMCPRecord(t *testing.T) {
+	oldRead := readKeychainSecret
+	oldUsername := currentUsername
+	t.Cleanup(func() {
+		readKeychainSecret = oldRead
+		currentUsername = oldUsername
+	})
+
+	currentUsername = func() (string, error) { return "test-user", nil }
+	readKeychainSecret = func(_ string, account string) (string, error) {
+		switch account {
+		case "test-user":
+			return `{"claudeAiOauth":{"accessToken":"user-token","refreshToken":"user-refresh"}}`, nil
+		case "":
+			t.Fatal("unscoped Keychain lookup must not run after current-user credentials succeed")
+			return "", nil
+		default:
+			return "", errors.New("not found")
+		}
+	}
+
+	creds := (&OAuthStrategy{}).loadKeychainCredentials()
+	if creds == nil || creds.AccessToken != "user-token" {
+		t.Fatalf("loadKeychainCredentials() = %#v, want current-user credentials", creds)
+	}
+}
+
+func TestLoadKeychainCredentials_FallsBackToLegacyUnscopedItem(t *testing.T) {
+	oldRead := readKeychainSecret
+	oldUsername := currentUsername
+	t.Cleanup(func() {
+		readKeychainSecret = oldRead
+		currentUsername = oldUsername
+	})
+
+	currentUsername = func() (string, error) { return "test-user", nil }
+	readKeychainSecret = func(_ string, account string) (string, error) {
+		if account == "test-user" {
+			return `{"mcpOAuth":{"plugin":"not-claude"}}`, nil
+		}
+		return `{"claudeAiOauth":{"accessToken":"legacy-token"}}`, nil
+	}
+
+	creds := (&OAuthStrategy{}).loadKeychainCredentials()
+	if creds == nil || creds.AccessToken != "legacy-token" {
+		t.Fatalf("loadKeychainCredentials() = %#v, want legacy credentials", creds)
+	}
+}
+
+func TestLoadKeychainCredentials_RejectsMCPOnlyRecords(t *testing.T) {
+	oldRead := readKeychainSecret
+	oldUsername := currentUsername
+	t.Cleanup(func() {
+		readKeychainSecret = oldRead
+		currentUsername = oldUsername
+	})
+
+	currentUsername = func() (string, error) { return "test-user", nil }
+	readKeychainSecret = func(_ string, _ string) (string, error) {
+		return `{"mcpOAuth":{"plugin":"not-claude"}}`, nil
+	}
+
+	if creds := (&OAuthStrategy{}).loadKeychainCredentials(); creds != nil {
+		t.Fatalf("loadKeychainCredentials() = %#v, want nil", creds)
 	}
 }
 

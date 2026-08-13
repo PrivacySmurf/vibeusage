@@ -30,6 +30,7 @@ import (
 	_ "github.com/joshuadavidthomas/vibeusage/internal/provider/gemini"
 	_ "github.com/joshuadavidthomas/vibeusage/internal/provider/kimicode"
 	_ "github.com/joshuadavidthomas/vibeusage/internal/provider/minimax"
+	_ "github.com/joshuadavidthomas/vibeusage/internal/provider/modelstudio"
 	_ "github.com/joshuadavidthomas/vibeusage/internal/provider/opencode"
 	_ "github.com/joshuadavidthomas/vibeusage/internal/provider/grok"
 	_ "github.com/joshuadavidthomas/vibeusage/internal/provider/openrouter"

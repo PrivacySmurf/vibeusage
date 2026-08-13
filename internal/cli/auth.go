@@ -83,6 +83,7 @@ var providerDescriptions = map[string]string{
 	"gemini":      "Google's Gemini AI (gemini.google.com)",
 	"kimicode":    "Kimi Code coding assistant (kimi.com)",
 	"minimax":     "MiniMax AI (minimax.io)",
+	"modelstudio": "Alibaba Cloud Model Studio Bailian (alibabacloud.com)",
 	"opencode":    "OpenCode AI coding agent (opencode.ai)",
 	"openrouter":  "OpenRouter unified model gateway (openrouter.ai)",
 	"warp":        "Warp terminal AI (warp.dev)",
