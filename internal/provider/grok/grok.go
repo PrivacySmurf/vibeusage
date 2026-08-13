@@ -3,6 +3,7 @@ package grok
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"time"
 
@@ -137,9 +138,9 @@ func (s *CookieStrategy) Fetch(ctx context.Context) (fetch.FetchResult, error) {
 		}
 
 		period := models.UsagePeriod{
-			Name:        m.label + " (" + m.key + ")",
+			Name:        periodName(m.label, m.key, rateLimits.WindowSizeSeconds),
 			Utilization: rateLimits.Utilization(),
-			PeriodType:  inferPeriodType(rateLimits.WindowType),
+			PeriodType:  inferPeriodType(rateLimits.WindowType, rateLimits.WindowSizeSeconds),
 			ResetsAt:    rateLimits.ResetsAt(),
 			Model:       m.key,
 		}
@@ -176,19 +177,38 @@ func buildCookieHeader(value string) string {
 	return "sct=" + value
 }
 
-// inferPeriodType maps Grok's windowType string to a vibeusage PeriodType.
-func inferPeriodType(windowType string) models.PeriodType {
+// periodName builds a human-readable name for a Grok usage period.
+// Uses "(Nh)" suffix when window size is known so the frontend session parser
+// can extract the duration from the name pattern.
+func periodName(label, modelKey string, windowSecs int) string {
+	if windowSecs > 0 {
+		hours := windowSecs / 3600
+		if hours > 0 {
+			return fmt.Sprintf("%s (%dh)", label, hours)
+		}
+	}
+	return label + " (" + modelKey + ")"
+}
+
+// inferPeriodType infers period type from the windowType string and/or windowSizeSeconds.
+func inferPeriodType(windowType string, windowSecs int) models.PeriodType {
 	switch strings.ToUpper(windowType) {
-	case "HOUR", "2HOUR", "2H":
-		return models.PeriodSession
 	case "DAY", "DAILY":
 		return models.PeriodDaily
 	case "WEEK", "WEEKLY":
 		return models.PeriodWeekly
 	case "MONTH", "MONTHLY":
 		return models.PeriodMonthly
+	}
+	// Fall back to duration-based inference.
+	switch {
+	case windowSecs <= 0 || windowSecs <= 6*3600:
+		return models.PeriodSession // ≤6h → session
+	case windowSecs <= 25*3600:
+		return models.PeriodDaily
+	case windowSecs <= 8*24*3600:
+		return models.PeriodWeekly
 	default:
-		// Grok free plan uses 2-hour windows for fast queries.
-		return models.PeriodSession
+		return models.PeriodMonthly
 	}
 }

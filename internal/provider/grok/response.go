@@ -10,20 +10,26 @@ type RateLimitsRequest struct {
 
 // RateLimitsResponse is the JSON response from POST /rest/rate-limits.
 type RateLimitsResponse struct {
-	TotalQueries     int    `json:"totalQueries"`
-	RemainingQueries int    `json:"remainingQueries"`
-	WindowType       string `json:"windowType,omitempty"`
-	ResetTime        *int64 `json:"resetTime,omitempty"` // Unix milliseconds
+	TotalQueries      int    `json:"totalQueries"`
+	RemainingQueries  int    `json:"remainingQueries"`
+	WindowSizeSeconds int    `json:"windowSizeSeconds,omitempty"`
+	WindowType        string `json:"windowType,omitempty"`
+	ResetTime         *int64 `json:"resetTime,omitempty"` // Unix milliseconds
 }
 
-// ResetsAt converts the reset timestamp to a time.Time, if present.
+// ResetsAt returns an approximate reset time. If the API provides an explicit
+// reset timestamp it is used; otherwise we approximate from now + window size.
 func (r RateLimitsResponse) ResetsAt() *time.Time {
-	if r.ResetTime == nil || *r.ResetTime <= 0 {
-		return nil
+	if r.ResetTime != nil && *r.ResetTime > 0 {
+		ms := *r.ResetTime
+		t := time.Unix(ms/1000, (ms%1000)*int64(time.Millisecond))
+		return &t
 	}
-	ms := *r.ResetTime
-	t := time.Unix(ms/1000, (ms%1000)*int64(time.Millisecond))
-	return &t
+	if r.WindowSizeSeconds > 0 {
+		t := time.Now().UTC().Add(time.Duration(r.WindowSizeSeconds) * time.Second)
+		return &t
+	}
+	return nil
 }
 
 // Utilization returns the percentage of queries used (0–100).
