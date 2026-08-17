@@ -29,3 +29,10 @@ go.work
 .env
 /vibeusage
 /vibeshots
+
+# macOS
+.DS_Store
+
+# Lab
+.lab.md.bak
+.sandbox/
