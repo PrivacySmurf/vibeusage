@@ -6,6 +6,7 @@
 - [ ] Add CLI commands and integration for ModelStudio provider
 
 ## Completed
+- [x] Investigate Model Studio session lifecycle and automation constraints (2026-08-18)
 - [x] Fix reset time parsing and effective reset calculations for expired period timestamps (2026-08-13)
 - [x] Implement ModelStudio provider with browser cookie extraction and unit tests (2026-08-13)
 - [x] Refactor Claude OAuth flow and update auth documentation (2026-08-13)
