@@ -429,4 +429,3 @@ func inferPeriodType(windowType string, windowSecs int) models.PeriodType {
 		return models.PeriodMonthly
 	}
 }
-

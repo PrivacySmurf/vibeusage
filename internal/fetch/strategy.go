@@ -117,7 +117,7 @@ type Strategy interface {
 // type name (e.g. *claude.OAuthStrategy → "oauth").
 func StrategyName(s Strategy) string {
 	t := reflect.TypeOf(s)
-	if t.Kind() == reflect.Ptr {
+	if t.Kind() == reflect.Pointer {
 		t = t.Elem()
 	}
 	name := t.Name()

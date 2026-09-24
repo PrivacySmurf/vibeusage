@@ -12,7 +12,7 @@ import (
 	"github.com/joshuadavidthomas/vibeusage/internal/models"
 )
 
-var errModelStudioSession = errors.New("Model Studio browser session is expired or invalid")
+var errModelStudioSession = errors.New("model studio browser session is expired or invalid")
 
 type consoleEnvelope struct {
 	Code            json.RawMessage `json:"code"`
@@ -433,9 +433,9 @@ func alibabaConsoleAPIError(code, message string) error {
 		return nil
 	}
 	if message != "" {
-		return fmt.Errorf("Alibaba console API error %s: %s", code, message)
+		return fmt.Errorf("alibaba console API error %s: %s", code, message)
 	}
-	return fmt.Errorf("Alibaba console API error %s", code)
+	return fmt.Errorf("alibaba console API error %s", code)
 }
 
 func isModelStudioSessionError(code, message string) bool {

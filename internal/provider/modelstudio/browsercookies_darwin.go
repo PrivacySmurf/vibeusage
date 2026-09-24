@@ -162,7 +162,7 @@ func fetchCookiesFromCDPEndpoint(ctx context.Context, port, path string) ([]brow
 	if err != nil {
 		return nil, err
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	if deadline, ok := ctx.Deadline(); ok {
 		_ = conn.SetDeadline(deadline)
@@ -220,13 +220,14 @@ func fetchCookiesFromCDPEndpoint(ctx context.Context, port, path string) ([]brow
 		}
 		isMasked := (header[1] & 0x80) != 0
 		payloadLen := int64(header[1] & 0x7f)
-		if payloadLen == 126 {
+		switch payloadLen {
+		case 126:
 			ext := make([]byte, 2)
 			if _, err := io.ReadFull(reader, ext); err != nil {
 				return nil, err
 			}
 			payloadLen = int64(ext[0])<<8 | int64(ext[1])
-		} else if payloadLen == 127 {
+		case 127:
 			ext := make([]byte, 8)
 			if _, err := io.ReadFull(reader, ext); err != nil {
 				return nil, err
@@ -587,16 +588,16 @@ func decryptChromiumCookie(encrypted []byte, hostKey, safeStoragePassword string
 
 	if dbVersion >= 24 {
 		if len(plaintext) < sha256.Size {
-			return nil, errors.New("Chromium cookie host digest missing")
+			return nil, errors.New("chromium cookie host digest missing")
 		}
 		digest := sha256.Sum256([]byte(hostKey))
 		if subtle.ConstantTimeCompare(plaintext[:sha256.Size], digest[:]) != 1 {
-			return nil, errors.New("Chromium cookie host digest mismatch")
+			return nil, errors.New("chromium cookie host digest mismatch")
 		}
 		plaintext = plaintext[sha256.Size:]
 	}
 	if !utf8.Valid(plaintext) {
-		return nil, errors.New("Chromium cookie value is not UTF-8")
+		return nil, errors.New("chromium cookie value is not UTF-8")
 	}
 	return plaintext, nil
 }

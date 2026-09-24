@@ -666,4 +666,3 @@ func parseAGYCLIResponse(data []byte) *models.UsageSnapshot {
 		Source:    "cli",
 	}
 }
-

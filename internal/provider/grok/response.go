@@ -201,4 +201,3 @@ func grokProductDisplayName(raw string) string {
 
 	return raw
 }
-

@@ -658,5 +658,3 @@ func TestParseAGYCLIResponse(t *testing.T) {
 		t.Errorf("period[1] utilization = %d, want 4", p2.Utilization)
 	}
 }
-
-
