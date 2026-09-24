@@ -535,6 +535,17 @@ func enableProvider(providerID string) error {
 	if err := config.SetProviderEnabled(providerID, true); err != nil {
 		return fmt.Errorf("enabling %s: %w", providerID, err)
 	}
+	// A successful `auth` run means credentials were just entered, or the
+	// user just confirmed detected credentials are good — either way, any
+	// previously persisted rate-limit cooldown for this provider no longer
+	// reflects reality. Clear it so the next fetch attempts live instead of
+	// replaying a pre-auth 429 until its stale retry-after time elapses on
+	// its own. If the provider is still genuinely throttled, that live
+	// attempt re-saves an accurate marker from the fresh response. This is
+	// intentionally narrower than config.ClearProviderCache: it leaves the
+	// cached snapshot and org ID in place so they can still serve as a
+	// fallback if the next live attempt fails for an unrelated reason.
+	_ = config.ClearThrottle(providerID)
 	return nil
 }
 

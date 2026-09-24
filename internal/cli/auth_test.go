@@ -10,9 +10,11 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/joshuadavidthomas/vibeusage/internal/config"
 	"github.com/joshuadavidthomas/vibeusage/internal/display"
+	"github.com/joshuadavidthomas/vibeusage/internal/fetch"
 	"github.com/joshuadavidthomas/vibeusage/internal/prompt"
 	"github.com/joshuadavidthomas/vibeusage/internal/provider"
 	"github.com/joshuadavidthomas/vibeusage/internal/testenv"
@@ -118,6 +120,154 @@ func TestAuthClaude_UsesInputWithValidation(t *testing.T) {
 	data, _ := config.ReadCredential("claude", "session")
 	if data == nil {
 		t.Error("expected credential to be saved")
+	}
+}
+
+// TestEnableProvider_ClearsStaleThrottleMarker is a direct unit test of the
+// fix: enableProvider is the common success funnel for every `auth` path
+// (manual key entry, reusing detected credentials, device/custom flows,
+// --token), so clearing the throttle marker there ensures a stale pre-auth
+// rate-limit cooldown never outlives a successful (re-)authentication.
+func TestEnableProvider_ClearsStaleThrottleMarker(t *testing.T) {
+	tmpDir := t.TempDir()
+	testenv.ApplySameDir(t.Setenv, tmpDir)
+	config.Override(t, config.DefaultConfig())
+
+	if err := config.SaveThrottle("claude", fetch.ThrottleMarker{
+		RetryAt: time.Now().Add(time.Hour),
+		Reason:  "Rate limited by Anthropic",
+	}); err != nil {
+		t.Fatalf("SaveThrottle error: %v", err)
+	}
+	if marker, err := config.LoadThrottle("claude"); err != nil || marker == nil {
+		t.Fatalf("expected throttle marker to be present before enableProvider, got marker=%v err=%v", marker, err)
+	}
+
+	if err := enableProvider("claude"); err != nil {
+		t.Fatalf("enableProvider error: %v", err)
+	}
+
+	marker, err := config.LoadThrottle("claude")
+	if err != nil {
+		t.Fatalf("LoadThrottle error: %v", err)
+	}
+	if marker != nil {
+		t.Errorf("expected throttle marker to be cleared after enableProvider, got %+v", marker)
+	}
+
+	// A throttle marker for an unrelated provider must be left alone.
+	if err := config.SaveThrottle("codex", fetch.ThrottleMarker{
+		RetryAt: time.Now().Add(time.Hour),
+		Reason:  "Rate limited",
+	}); err != nil {
+		t.Fatalf("SaveThrottle error: %v", err)
+	}
+	if err := enableProvider("claude"); err != nil {
+		t.Fatalf("enableProvider error: %v", err)
+	}
+	if marker, err := config.LoadThrottle("codex"); err != nil || marker == nil {
+		t.Errorf("expected unrelated provider's throttle marker to survive, got marker=%v err=%v", marker, err)
+	}
+}
+
+// TestAuthClaude_ManualKeyEntry_ClearsStaleThrottleMarker exercises the full
+// authProvider path for a brand-new manual session key: a stale throttle
+// marker saved before auth (mirroring a pre-login 429) must not survive a
+// successful re-authentication, otherwise the next `vibeusage usage` call
+// keeps replaying the old cached error instead of attempting a live fetch.
+func TestAuthClaude_ManualKeyEntry_ClearsStaleThrottleMarker(t *testing.T) {
+	mock := &prompt.Mock{
+		InputFunc: func(cfg prompt.InputConfig) (string, error) {
+			return "sk-ant-" + "sid01-" + "test123", nil
+		},
+		ConfirmFunc: func(cfg prompt.ConfirmConfig) (bool, error) {
+			return false, nil // decline detected creds, enter new
+		},
+	}
+
+	old := prompt.Default
+	prompt.SetDefault(mock)
+	defer prompt.SetDefault(old)
+
+	tmpDir := t.TempDir()
+	testenv.ApplySameDir(t.Setenv, tmpDir)
+	t.Setenv("ANTHROPIC_API_KEY", "")
+	config.Override(t, config.DefaultConfig())
+
+	var buf bytes.Buffer
+	outWriter = &buf
+	defer func() { outWriter = os.Stdout }()
+
+	if err := config.SaveThrottle("claude", fetch.ThrottleMarker{
+		RetryAt: time.Now().Add(time.Hour),
+		Reason:  "Rate limited by Anthropic",
+	}); err != nil {
+		t.Fatalf("SaveThrottle error: %v", err)
+	}
+
+	p, _ := provider.Get("claude")
+	if err := authProvider(context.Background(), "claude", p); err != nil {
+		t.Fatalf("authProvider(claude) error: %v", err)
+	}
+
+	marker, err := config.LoadThrottle("claude")
+	if err != nil {
+		t.Fatalf("LoadThrottle error: %v", err)
+	}
+	if marker != nil {
+		t.Errorf("expected stale throttle marker to be cleared after re-authenticating, got %+v", marker)
+	}
+}
+
+// TestAuthProvider_ReusingDetectedCredentials_ClearsStaleThrottleMarker
+// covers the other authProvider success branch: confirming reuse of
+// already-detected credentials (e.g. after an external `claude login`)
+// without typing anything new. This must also drop a stale throttle marker.
+func TestAuthProvider_ReusingDetectedCredentials_ClearsStaleThrottleMarker(t *testing.T) {
+	mock := &prompt.Mock{
+		ConfirmFunc: func(cfg prompt.ConfirmConfig) (bool, error) {
+			return true, nil // reuse detected creds
+		},
+	}
+
+	old := prompt.Default
+	prompt.SetDefault(mock)
+	defer prompt.SetDefault(old)
+
+	tmpDir := t.TempDir()
+	testenv.ApplySameDir(t.Setenv, tmpDir)
+	config.Override(t, config.DefaultConfig())
+
+	var buf bytes.Buffer
+	outWriter = &buf
+	defer func() { outWriter = os.Stdout }()
+
+	// Seed a detectable credential directly so offerExistingCredentials
+	// finds it without going through a real login flow.
+	if err := config.WriteCredential("claude", "session", []byte(`{"session_key":"sk-ant-sid01-detected"}`)); err != nil {
+		t.Fatalf("WriteCredential error: %v", err)
+	}
+	if err := config.SaveThrottle("claude", fetch.ThrottleMarker{
+		RetryAt: time.Now().Add(time.Hour),
+		Reason:  "Rate limited by Anthropic",
+	}); err != nil {
+		t.Fatalf("SaveThrottle error: %v", err)
+	}
+
+	p, _ := provider.Get("claude")
+	if err := authProvider(context.Background(), "claude", p); err != nil {
+		t.Fatalf("authProvider(claude) error: %v", err)
+	}
+	if len(mock.ConfirmCalls) != 1 {
+		t.Fatalf("expected the detected-credentials confirm prompt, got %d confirm calls", len(mock.ConfirmCalls))
+	}
+
+	marker, err := config.LoadThrottle("claude")
+	if err != nil {
+		t.Fatalf("LoadThrottle error: %v", err)
+	}
+	if marker != nil {
+		t.Errorf("expected stale throttle marker to be cleared after confirming reuse of detected credentials, got %+v", marker)
 	}
 }
 
