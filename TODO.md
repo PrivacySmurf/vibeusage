@@ -4,6 +4,7 @@
 
 ## Up Next
 - [ ] Add CLI commands and integration for ModelStudio provider
+- [ ] Clear/bypass the Claude throttle marker (`~/Library/Caches/vibeusage/throttles/claude.json`) on `vibeusage auth claude` re-login, so a stale pre-login 429 `retry_at` doesn't keep blocking fetches after credentials are refreshed
 
 ## Completed
 - [x] Investigate Model Studio session lifecycle and automation constraints (2026-08-18)
