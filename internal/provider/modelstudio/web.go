@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/joshuadavidthomas/vibeusage/internal/config"
 	"github.com/joshuadavidthomas/vibeusage/internal/fetch"
@@ -17,13 +18,14 @@ import (
 )
 
 const (
-	modelStudioConsoleBaseURL = "https://modelstudio.console.alibabacloud.com"
-	modelStudioDashboardURL   = modelStudioConsoleBaseURL + "/ap-southeast-1/?tab=plan#/efm/subscription/token-plan/enterprise"
-	modelStudioRegion         = "ap-southeast-1"
-	modelStudioTeamProduct    = "sfm_tokenplanteams_dp_intl"
-	bssProduct                = "BssOpenAPI-V3"
-	subscriptionSummaryAction = "GetSubscriptionSummary"
-	browserUserAgent          = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36"
+	modelStudioConsoleBaseURL  = "https://modelstudio.console.alibabacloud.com"
+	modelStudioDashboardURL    = modelStudioConsoleBaseURL + "/ap-southeast-1/?tab=plan#/efm/subscription/token-plan/enterprise"
+	modelStudioRegion          = "ap-southeast-1"
+	modelStudioTeamProduct     = "sfm_tokenplanteams_dp_intl"
+	bssProduct                 = "BssOpenAPI-V3"
+	subscriptionSummaryAction  = "GetSubscriptionSummary"
+	browserUserAgent           = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36"
+	modelStudioSessionCooldown = 30 * time.Minute
 )
 
 type WebConsoleStrategy struct {
@@ -160,7 +162,7 @@ func (s *WebConsoleStrategy) fetchImportedBrowserSession(
 ) (fetch.FetchResult, error) {
 	imported, importErr := importModelStudioBrowserSession(ctx)
 	if importErr != nil {
-		return fetch.ResultFatal(modelStudioSessionHint(previous, importErr)), nil
+		return fetch.ResultThrottled(modelStudioSessionHint(previous, importErr), time.Now().Add(modelStudioSessionCooldown)), nil
 	}
 
 	creds := sessionCredentials{
@@ -171,7 +173,7 @@ func (s *WebConsoleStrategy) fetchImportedBrowserSession(
 	snapshot, err := s.fetchWithSession(ctx, client, creds)
 	if err != nil {
 		if errors.Is(err, errModelStudioSession) {
-			return fetch.ResultFatal(modelStudioSessionHint(creds, nil)), nil
+			return fetch.ResultThrottled(modelStudioSessionHint(creds, nil), time.Now().Add(modelStudioSessionCooldown)), nil
 		}
 		return fetch.ResultFail(fmt.Sprintf("Model Studio web console API failed after importing %s cookies: %v", imported.SourceLabel, err)), nil
 	}

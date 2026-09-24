@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/joshuadavidthomas/vibeusage/internal/config"
 	"github.com/joshuadavidthomas/vibeusage/internal/httpclient"
@@ -266,6 +267,83 @@ func TestWebConsoleFetchDoesNotRetryWorkspacePermissionError(t *testing.T) {
 	}
 	if imports.Load() != 0 {
 		t.Errorf("browser imports = %d, want 0", imports.Load())
+	}
+}
+
+func TestWebConsoleFetchThrottlesOnBrowserImportFailure(t *testing.T) {
+	testenv.ApplyVibeusage(t.Setenv, t.TempDir())
+	server := newModelStudioSessionServer(t, func(string) string { return successfulSummaryPayload() })
+
+	oldImporter := importModelStudioBrowserSession
+	t.Cleanup(func() { importModelStudioBrowserSession = oldImporter })
+	importModelStudioBrowserSession = func(context.Context) (browserSession, error) {
+		return browserSession{}, fmt.Errorf("no browser session found")
+	}
+
+	strategy := &WebConsoleStrategy{
+		ConsoleBaseURL: server.URL,
+		DashboardURL:   server.URL,
+		Region:         modelStudioRegion,
+		ProductCode:    modelStudioTeamProduct,
+	}
+	result, err := strategy.Fetch(context.Background())
+	if err != nil {
+		t.Fatalf("Fetch() error: %v", err)
+	}
+	if result.Success {
+		t.Fatalf("expected failure, got success: %+v", result)
+	}
+	if result.RetryAfter == nil {
+		t.Fatalf("expected RetryAfter to be set, got nil")
+	}
+	if !result.ShouldFallback {
+		t.Errorf("expected ShouldFallback = true for throttled result")
+	}
+	if time.Until(*result.RetryAfter) <= 0 || time.Until(*result.RetryAfter) > 31*time.Minute {
+		t.Errorf("unexpected RetryAfter: %v", result.RetryAfter)
+	}
+	if !strings.Contains(result.Error, "No signed-in Model Studio browser session") {
+		t.Errorf("unexpected Error: %q", result.Error)
+	}
+}
+
+func TestWebConsoleFetchThrottlesWhenImportedSessionExpired(t *testing.T) {
+	testenv.ApplyVibeusage(t.Setenv, t.TempDir())
+	server := newModelStudioSessionServer(t, func(string) string { return expiredSessionPayload() })
+
+	oldImporter := importModelStudioBrowserSession
+	t.Cleanup(func() { importModelStudioBrowserSession = oldImporter })
+	importModelStudioBrowserSession = func(context.Context) (browserSession, error) {
+		return browserSession{
+			Cookie:      "login_aliyunid_ticket=expired-ticket; login_current_pk=account",
+			SourceLabel: "Chrome Profile 1",
+		}, nil
+	}
+
+	strategy := &WebConsoleStrategy{
+		ConsoleBaseURL: server.URL,
+		DashboardURL:   server.URL,
+		Region:         modelStudioRegion,
+		ProductCode:    modelStudioTeamProduct,
+	}
+	result, err := strategy.Fetch(context.Background())
+	if err != nil {
+		t.Fatalf("Fetch() error: %v", err)
+	}
+	if result.Success {
+		t.Fatalf("expected failure, got success: %+v", result)
+	}
+	if result.RetryAfter == nil {
+		t.Fatalf("expected RetryAfter to be set, got nil")
+	}
+	if !result.ShouldFallback {
+		t.Errorf("expected ShouldFallback = true for throttled result")
+	}
+	if time.Until(*result.RetryAfter) <= 0 || time.Until(*result.RetryAfter) > 31*time.Minute {
+		t.Errorf("unexpected RetryAfter: %v", result.RetryAfter)
+	}
+	if !strings.Contains(result.Error, "Chrome Profile 1") {
+		t.Errorf("unexpected Error (expected mention of Chrome Profile 1): %q", result.Error)
 	}
 }
 

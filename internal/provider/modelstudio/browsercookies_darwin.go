@@ -113,39 +113,72 @@ func approveChromeRemoteDebugging() {
 	script := `
 using terms from application "System Events"
   on clickAllow(nodeRef)
-    try
-      if (role of nodeRef as text) is "AXButton" and (description of nodeRef as text) is "Allow" then
-        perform action "AXPress" of nodeRef
+    tell application "System Events"
+      set isAllowButton to false
+      try
+        if (role of nodeRef as text) is "AXButton" and (description of nodeRef as text) is "Allow" then
+          set isAllowButton to true
+        end if
+      end try
+      if isAllowButton then
+        try
+          click nodeRef
+        on error
+          perform action "AXPress" of nodeRef
+        end try
         return true
       end if
-    end try
-    try
-      repeat with childRef in UI elements of nodeRef
+      set kids to {}
+      try
+        set kids to UI elements of nodeRef
+      end try
+      repeat with childRef in kids
         if my clickAllow(childRef) then return true
       end repeat
-    end try
+    end tell
     return false
   end clickAllow
+
+  on isRemoteDebuggingSheet(s)
+    tell application "System Events"
+      set els to {}
+      try
+        set els to entire contents of s
+      end try
+      repeat with el in els
+        set isMatch to false
+        try
+          if (role of el as text) is "AXHeading" and (name of el as text) is "Allow remote debugging?" then
+            set isMatch to true
+          end if
+        end try
+        if isMatch then return true
+      end repeat
+    end tell
+    return false
+  end isRemoteDebuggingSheet
 end using terms from
 
 tell application "System Events"
   if not (exists process "Google Chrome") then return "no-chrome"
   tell process "Google Chrome"
     repeat with w in windows
+      set sheetList to {}
       try
-        repeat with s in sheets of w
-          if (name of s as text) is "Allow remote debugging?" then
-            if my clickAllow(s) then return "approved"
-            return "sheet-without-allow"
-          end if
-        end repeat
+        set sheetList to sheets of w
       end try
+      repeat with s in sheetList
+        if my isRemoteDebuggingSheet(s) then
+          if my clickAllow(s) then return "approved"
+          return "sheet-without-allow"
+        end if
+      end repeat
     end repeat
   end tell
 end tell
 return "no-sheet"
 `
-	for i := 0; i < 5; i++ {
+	for i := 0; i < 12; i++ {
 		time.Sleep(300 * time.Millisecond)
 		out, err := exec.Command("osascript", "-e", script).Output()
 		if err == nil && strings.TrimSpace(string(out)) == "approved" {
