@@ -36,6 +36,19 @@ func (c Credentials) NeedsRefresh() bool {
 	return time.Now().UTC().Add(RefreshBuffer).After(expiry)
 }
 
+// IsExpired reports whether the credentials are past their expiry time.
+// Returns false if ExpiresAt is empty. Returns true if unparseable or already past.
+func (c Credentials) IsExpired() bool {
+	if c.ExpiresAt == "" {
+		return false
+	}
+	expiry, err := time.Parse(time.RFC3339, c.ExpiresAt)
+	if err != nil {
+		return true
+	}
+	return time.Now().UTC().After(expiry)
+}
+
 // TokenResponse represents the response from an OAuth token refresh endpoint.
 type TokenResponse struct {
 	AccessToken  string  `json:"access_token"`

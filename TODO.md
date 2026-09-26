@@ -5,6 +5,7 @@
 ## Up Next
 
 ## Completed
+- [x] Fix Claude OAuth 429 refresh handling, select Keychain credentials over stale file tokens, preserve authentic provider source in JSON output, and support non-invasive background CDP profiles for Model Studio (2026-09-26)
 - [x] Fix AppleScript sheet detection/click and throttle expired Model Studio sessions to avoid repeated failed queries (2026-09-24)
 - [x] Add CLI commands and integration for ModelStudio provider with CDP cookie extraction and Keychain bypass (2026-09-24)
 - [x] Install `just`, `golangci-lint`, and `pre-commit` locally and fix everything `just check` found (EOF/import-order, errcheck, govet, 6x staticcheck ST1005, 2 outdated GitHub Action pins) — `just check` now passes clean end-to-end (2026-09-24)

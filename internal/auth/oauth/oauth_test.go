@@ -72,6 +72,69 @@ func TestCredentials_NeedsRefresh(t *testing.T) {
 	}
 }
 
+func TestCredentials_IsExpired(t *testing.T) {
+	tests := []struct {
+		name  string
+		creds Credentials
+		want  bool
+	}{
+		{
+			name:  "no expiry",
+			creds: Credentials{AccessToken: "tok"},
+			want:  false,
+		},
+		{
+			name: "far future",
+			creds: Credentials{
+				AccessToken: "tok",
+				ExpiresAt:   "2099-01-01T00:00:00Z",
+			},
+			want: false,
+		},
+		{
+			name: "expired",
+			creds: Credentials{
+				AccessToken: "tok",
+				ExpiresAt:   "2020-01-01T00:00:00Z",
+			},
+			want: true,
+		},
+		{
+			name: "invalid date",
+			creds: Credentials{
+				AccessToken: "tok",
+				ExpiresAt:   "garbage",
+			},
+			want: true,
+		},
+		{
+			name: "within buffer but not expired",
+			creds: Credentials{
+				AccessToken: "tok",
+				ExpiresAt:   time.Now().UTC().Add(2 * time.Minute).Format(time.RFC3339),
+			},
+			want: false,
+		},
+		{
+			name: "past by 1 second",
+			creds: Credentials{
+				AccessToken: "tok",
+				ExpiresAt:   time.Now().UTC().Add(-1 * time.Second).Format(time.RFC3339),
+			},
+			want: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := tt.creds.IsExpired()
+			if got != tt.want {
+				t.Errorf("IsExpired() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestCredentials_Roundtrip(t *testing.T) {
 	original := Credentials{
 		AccessToken:  "my-token",

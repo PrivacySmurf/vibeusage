@@ -534,6 +534,77 @@ func TestOutputMultiProviderJSON_ErrorWithEmptyMessage(t *testing.T) {
 	}
 }
 
+func TestOutputMultiProviderJSON_FreshnessAndStaleness(t *testing.T) {
+	var buf bytes.Buffer
+	now := time.Now()
+	oneDayAgo := now.Add(-24 * time.Hour)
+
+	outcomes := map[string]fetch.FetchOutcome{
+		"live_provider": {
+			ProviderID: "live_provider",
+			Success:    true,
+			Source:     "oauth",
+			Cached:     false,
+			Snapshot: &models.UsageSnapshot{
+				Provider:  "live_provider",
+				FetchedAt: now,
+				Periods:   []models.UsagePeriod{{Name: "Session", Utilization: 20}},
+			},
+		},
+		"fresh_cached_provider": {
+			ProviderID: "fresh_cached_provider",
+			Success:    true,
+			Source:     "cache",
+			Cached:     true,
+			Snapshot: &models.UsageSnapshot{
+				Provider:  "fresh_cached_provider",
+				FetchedAt: now.Add(-60 * time.Second),
+				Periods:   []models.UsagePeriod{{Name: "Session", Utilization: 30}},
+			},
+		},
+		"stale_cached_provider": {
+			ProviderID: "stale_cached_provider",
+			Success:    true,
+			Source:     "cache (throttled)",
+			Cached:     true,
+			Snapshot: &models.UsageSnapshot{
+				Provider:  "stale_cached_provider",
+				FetchedAt: oneDayAgo,
+				Periods:   []models.UsagePeriod{{Name: "Session", Utilization: 40}},
+			},
+		},
+	}
+
+	if err := OutputMultiProviderJSON(&buf, outcomes); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var result struct {
+		Providers map[string]models.UsageSnapshot `json:"providers"`
+	}
+	if err := json.Unmarshal(buf.Bytes(), &result); err != nil {
+		t.Fatalf("output is not valid JSON: %v", err)
+	}
+
+	live := result.Providers["live_provider"]
+	if live.Freshness != "live" || live.Stale || live.Cached {
+		t.Errorf("live_provider: freshness=%q, is_stale=%v, cached=%v; want live, false, false", live.Freshness, live.Stale, live.Cached)
+	}
+
+	freshCached := result.Providers["fresh_cached_provider"]
+	if freshCached.Freshness != "cached_fresh" || freshCached.Stale || !freshCached.Cached {
+		t.Errorf("fresh_cached_provider: freshness=%q, is_stale=%v, cached=%v; want cached_fresh, false, true", freshCached.Freshness, freshCached.Stale, freshCached.Cached)
+	}
+
+	staleCached := result.Providers["stale_cached_provider"]
+	if staleCached.Freshness != "fallback_stale" || !staleCached.Stale || !staleCached.Cached || staleCached.Source != "cache (throttled)" {
+		t.Errorf("stale_cached_provider: freshness=%q, is_stale=%v, cached=%v, source=%q; want fallback_stale, true, true, cache (throttled)", staleCached.Freshness, staleCached.Stale, staleCached.Cached, staleCached.Source)
+	}
+	if staleCached.DataAgeSeconds < 86000 {
+		t.Errorf("stale_cached_provider: data_age_seconds=%d, want >= 86000", staleCached.DataAgeSeconds)
+	}
+}
+
 // OutputStatusJSON structural tests
 
 func TestOutputStatusJSON_Structure(t *testing.T) {

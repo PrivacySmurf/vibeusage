@@ -226,6 +226,10 @@ type UsageSnapshot struct {
 	Identity         *ProviderIdentity `json:"identity,omitempty"`
 	Status           *ProviderStatus   `json:"status,omitempty"`
 	Source           string            `json:"source,omitempty"`
+	DataAgeSeconds   int               `json:"data_age_seconds"`
+	Stale            bool              `json:"is_stale"`
+	Freshness        string            `json:"freshness,omitempty"`
+	Cached           bool              `json:"cached"`
 }
 
 func (s UsageSnapshot) PrimaryPeriod() *UsagePeriod {

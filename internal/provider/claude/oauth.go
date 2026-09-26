@@ -72,13 +72,30 @@ func (s *OAuthStrategy) Fetch(ctx context.Context) (fetch.FetchResult, error) {
 
 	client := httpclient.NewFromConfig(s.HTTPTimeout)
 	result, unauthorized, err := s.fetchWithCredentials(ctx, client, creds)
-	if err != nil || !unauthorized || creds.RefreshToken == "" {
+	if err != nil {
 		return result, err
+	}
+
+	// If the request was rejected (401 unauthorized, or 429 rate-limited while token needs refresh),
+	// attempt to refresh credentials via the Claude CLI.
+	needsRefreshOn429 := result.RetryAfter != nil && creds.NeedsRefresh()
+	if !unauthorized && !needsRefreshOn429 {
+		return result, nil
+	}
+
+	if creds.RefreshToken == "" {
+		if unauthorized || creds.IsExpired() {
+			return fetch.ResultFatal("OAuth token expired or invalid. Re-authenticate with the Claude CLI."), nil
+		}
+		return result, nil
 	}
 
 	refreshed := s.refreshViaCLI(ctx)
 	if refreshed == nil {
-		return fetch.ResultFatal("OAuth token expired and could not be refreshed. Re-authenticate with the Claude CLI."), nil
+		if unauthorized || creds.IsExpired() {
+			return fetch.ResultFatal("OAuth token expired and could not be refreshed. Re-authenticate with the Claude CLI."), nil
+		}
+		return result, nil
 	}
 	result, _, err = s.fetchWithCredentials(ctx, client, refreshed)
 	return result, err
@@ -214,26 +231,48 @@ func (s *OAuthStrategy) externalPaths() []string {
 }
 
 func (s *OAuthStrategy) loadCredentials() *oauth.Credentials {
-	// Read only from canonical Claude CLI sources. The OAuth chain is owned
+	// Read from canonical Claude CLI sources. The OAuth chain is owned
 	// by the Claude CLI; vibeusage is a piggy-back consumer and never writes
 	// new tokens. Any stale entry in vibeusage's own credentials store is
 	// cleared lazily so it can't shadow the live source.
+	var candidates []*oauth.Credentials
+
 	for _, path := range s.externalPaths() {
 		data, err := os.ReadFile(path)
 		if err != nil {
 			continue
 		}
 		if creds := parseClaudeCredentials(data); creds != nil {
-			cleanupOrphanOAuthSlot()
-			return creds
+			candidates = append(candidates, creds)
 		}
 	}
 
 	if creds := s.loadKeychainCredentials(); creds != nil {
-		cleanupOrphanOAuthSlot()
-		return creds
+		candidates = append(candidates, creds)
 	}
-	return nil
+
+	if len(candidates) == 0 {
+		return nil
+	}
+
+	cleanupOrphanOAuthSlot()
+
+	// Pick the best candidate: prefer non-expired credentials, or the one with the latest expiration.
+	best := candidates[0]
+	for _, c := range candidates[1:] {
+		if best.IsExpired() && !c.IsExpired() {
+			best = c
+			continue
+		}
+		if !best.IsExpired() && c.IsExpired() {
+			continue
+		}
+		if c.ExpiresAt != "" && (best.ExpiresAt == "" || c.ExpiresAt > best.ExpiresAt) {
+			best = c
+		}
+	}
+
+	return best
 }
 
 // cleanupOrphanOAuthSlot removes any vibeusage-owned claude/oauth credential.

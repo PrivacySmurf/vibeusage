@@ -834,6 +834,114 @@ func TestFetch_RefreshesAfterUnauthorized(t *testing.T) {
 	}
 }
 
+func TestFetch_RefreshesAfter429WhenTokenNeedsRefresh(t *testing.T) {
+	home := t.TempDir()
+	setUserHome(t, home)
+	testenv.ApplyVibeusage(t.Setenv, t.TempDir())
+	stubKeychainEmpty(t)
+	cacheClaudeIdentity(t)
+	writeClaudeAuth(t, home, `{"claudeAiOauth":{"accessToken":"stale","refreshToken":"ref","expiresAt":1}}`)
+	prependFakeClaude(t, "#!/usr/bin/env sh\ncat > "+strconv.Quote(filepath.Join(home, ".claude", ".credentials.json"))+" <<'JSON'\n{\"claudeAiOauth\":{\"accessToken\":\"fresh\",\"refreshToken\":\"ref\",\"expiresAt\":4102444800000}}\nJSON\n")
+
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		switch r.Header.Get("Authorization") {
+		case "Bearer stale":
+			w.Header().Set("Retry-After", "120")
+			http.Error(w, `{"error":{"type":"rate_limit_error","message":"Rate limited"}}`, http.StatusTooManyRequests)
+		case "Bearer fresh":
+			_, _ = w.Write([]byte(`{"five_hour":{"utilization":10}}`))
+		default:
+			t.Errorf("unexpected Authorization header: %q", r.Header.Get("Authorization"))
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+		}
+	}))
+	defer server.Close()
+	setClaudeOAuthEndpoints(t, server.URL+"/usage", server.URL+"/account")
+
+	result, err := (&OAuthStrategy{HTTPTimeout: 2}).Fetch(context.Background())
+	if err != nil {
+		t.Fatalf("Fetch() err = %v", err)
+	}
+	if !result.Success {
+		t.Fatalf("Fetch() success = false, error = %q", result.Error)
+	}
+	if got := requests.Load(); got != 2 {
+		t.Errorf("usage requests = %d, want 2", got)
+	}
+}
+
+func TestFetch_ExpiredToken429FailsFatalWhenCLIRefreshFails(t *testing.T) {
+	home := t.TempDir()
+	setUserHome(t, home)
+	testenv.ApplyVibeusage(t.Setenv, t.TempDir())
+	stubKeychainEmpty(t)
+	cacheClaudeIdentity(t)
+	writeClaudeAuth(t, home, `{"claudeAiOauth":{"accessToken":"expired-tok","refreshToken":"ref","expiresAt":1}}`)
+	// CLI that fails without updating credentials
+	prependFakeClaude(t, "#!/usr/bin/env sh\nexit 1\n")
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Retry-After", "300")
+		http.Error(w, `{"error":{"type":"rate_limit_error"}}`, http.StatusTooManyRequests)
+	}))
+	defer server.Close()
+	setClaudeOAuthEndpoints(t, server.URL+"/usage", server.URL+"/account")
+
+	result, err := (&OAuthStrategy{HTTPTimeout: 2}).Fetch(context.Background())
+	if err != nil {
+		t.Fatalf("Fetch() err = %v", err)
+	}
+	if result.Success {
+		t.Fatal("expected failure")
+	}
+	if result.ShouldFallback {
+		t.Error("expected ShouldFallback = false (fatal error)")
+	}
+	if !strings.Contains(result.Error, "OAuth token expired and could not be refreshed") {
+		t.Errorf("unexpected error: %q", result.Error)
+	}
+}
+
+func TestFetch_FreshToken429ReturnsThrottledWithoutCLIRefresh(t *testing.T) {
+	home := t.TempDir()
+	setUserHome(t, home)
+	testenv.ApplyVibeusage(t.Setenv, t.TempDir())
+	stubKeychainEmpty(t)
+	cacheClaudeIdentity(t)
+	// Fresh token expiring far in the future
+	writeClaudeAuth(t, home, `{"claudeAiOauth":{"accessToken":"fresh-tok","refreshToken":"ref","expiresAt":4102444800000}}`)
+	// CLI that would fail if called
+	prependFakeClaude(t, "#!/usr/bin/env sh\nexit 1\n")
+
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		w.Header().Set("Retry-After", "120")
+		http.Error(w, `{"error":{"type":"rate_limit_error"}}`, http.StatusTooManyRequests)
+	}))
+	defer server.Close()
+	setClaudeOAuthEndpoints(t, server.URL+"/usage", server.URL+"/account")
+
+	result, err := (&OAuthStrategy{HTTPTimeout: 2}).Fetch(context.Background())
+	if err != nil {
+		t.Fatalf("Fetch() err = %v", err)
+	}
+	if result.Success {
+		t.Fatal("expected failure for 429")
+	}
+	if result.RetryAfter == nil {
+		t.Fatal("expected RetryAfter to be populated")
+	}
+	if !result.ShouldFallback {
+		t.Error("expected ShouldFallback = true for throttled result")
+	}
+	if got := requests.Load(); got != 1 {
+		t.Errorf("usage requests = %d, want 1", got)
+	}
+}
+
 func TestLoadCredentials_DeletesOrphanSlotWhenCanonicalFilePresent(t *testing.T) {
 	home := t.TempDir()
 	setUserHome(t, home)
@@ -900,5 +1008,55 @@ func TestLoadCredentials_NoCanonicalSource_PreservesOrphan(t *testing.T) {
 	}
 	if !config.HasCredential("claude", "oauth") {
 		t.Error("orphan should not be deleted when no canonical source is found")
+	}
+}
+
+func TestLoadCredentials_PrefersValidKeychainOverExpiredFile(t *testing.T) {
+	home := t.TempDir()
+	setUserHome(t, home)
+	testenv.ApplyVibeusage(t.Setenv, t.TempDir())
+
+	// Write expired credentials to file (~/.claude/.credentials.json)
+	writeClaudeAuth(t, home, `{"claudeAiOauth":{"accessToken":"file-expired","refreshToken":"ref","expiresAt":1}}`)
+
+	// Keychain has valid credentials
+	old := readKeychainSecret
+	t.Cleanup(func() { readKeychainSecret = old })
+	readKeychainSecret = func(string, string) (string, error) {
+		return `{"claudeAiOauth":{"accessToken":"kc-fresh","refreshToken":"ref","expiresAt":4102444800000}}`, nil
+	}
+
+	s := OAuthStrategy{}
+	creds := s.loadCredentials()
+	if creds == nil {
+		t.Fatal("loadCredentials() = nil, want keychain creds")
+	}
+	if creds.AccessToken != "kc-fresh" {
+		t.Errorf("access_token = %q, want kc-fresh", creds.AccessToken)
+	}
+}
+
+func TestLoadCredentials_PrefersLaterExpiry(t *testing.T) {
+	home := t.TempDir()
+	setUserHome(t, home)
+	testenv.ApplyVibeusage(t.Setenv, t.TempDir())
+
+	// Write credentials expiring at timestamp 2000000000000 (~2033)
+	writeClaudeAuth(t, home, `{"claudeAiOauth":{"accessToken":"file-newer","refreshToken":"ref","expiresAt":2000000000000}}`)
+
+	// Keychain has credentials expiring at timestamp 1800000000000 (~2027)
+	old := readKeychainSecret
+	t.Cleanup(func() { readKeychainSecret = old })
+	readKeychainSecret = func(string, string) (string, error) {
+		return `{"claudeAiOauth":{"accessToken":"kc-older","refreshToken":"ref","expiresAt":1800000000000}}`, nil
+	}
+
+	s := OAuthStrategy{}
+	creds := s.loadCredentials()
+	if creds == nil {
+		t.Fatal("loadCredentials() = nil, want newer file creds")
+	}
+	if creds.AccessToken != "file-newer" {
+		t.Errorf("access_token = %q, want file-newer", creds.AccessToken)
 	}
 }
