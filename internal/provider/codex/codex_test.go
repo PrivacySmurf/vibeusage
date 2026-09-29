@@ -404,7 +404,7 @@ func TestFetch_UsesNoExpiryTokenBeforeRefreshing(t *testing.T) {
 	t.Setenv("CODEX_HOME", "")
 	testenv.ApplyVibeusage(t.Setenv, t.TempDir())
 	stubCodexKeychainEmpty(t)
-	writeCodexAuth(t, home, `{"tokens":{"access_token":"still-valid","refresh_token":"ref"}}`)
+	writeCodexAuth(t, home, `{"tokens":{"access_token":"still-valid","refresh_token":"ref","account_id":"account-123"}}`)
 	t.Setenv("PATH", t.TempDir())
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -413,7 +413,12 @@ func TestFetch_UsesNoExpiryTokenBeforeRefreshing(t *testing.T) {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
-		_, _ = w.Write([]byte(`{"plan_type":"pro","rate_limit":{"primary_window":{"used_percent":10}}}`))
+		if got := r.Header.Get("ChatGPT-Account-Id"); got != "account-123" {
+			t.Errorf("ChatGPT-Account-Id = %q, want account-123", got)
+			http.Error(w, "wrong account", http.StatusBadRequest)
+			return
+		}
+		_, _ = w.Write([]byte(`{"plan_type":"pro","rate_limit":{"primary_window":{"used_percent":52}}}`))
 	}))
 	defer server.Close()
 	writeCodexConfig(t, home, server.URL)
@@ -424,6 +429,9 @@ func TestFetch_UsesNoExpiryTokenBeforeRefreshing(t *testing.T) {
 	}
 	if !result.Success {
 		t.Fatalf("Fetch() success = false, error = %q", result.Error)
+	}
+	if got := result.Snapshot.Periods[0].Utilization; got != 52 {
+		t.Errorf("utilization = %d, want 52", got)
 	}
 }
 

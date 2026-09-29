@@ -183,6 +183,7 @@ func ExecutePipeline(ctx context.Context, providerID string, strategies []Strate
 			cached = nil
 		}
 		if cachedSnapshotMatchesProvider(cached, providerID) && anyAttempted {
+			logger.Warn("live fetch failed, serving stale cache", "provider", providerID, "err", lastErr, "cache_age", time.Since(cached.FetchedAt))
 			return FetchOutcome{
 				ProviderID: providerID,
 				Success:    true,

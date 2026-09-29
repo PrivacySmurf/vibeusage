@@ -5,6 +5,7 @@
 ## Up Next
 
 ## Completed
+- [x] Scope Codex usage requests to the active ChatGPT account, expose stale-cache fetch failures, and update mise-action workflow pins (2026-09-29)
 - [x] Fix post-reboot Claude and Model Studio credential state, extract active session cookies from Chrome CDP, and configure persistent launchd service for DSH Computer Use CUADaemon (2026-09-26)
 - [x] Fix Claude OAuth 429 refresh handling, select Keychain credentials over stale file tokens, preserve authentic provider source in JSON output, and support non-invasive background CDP profiles for Model Studio (2026-09-26)
 - [x] Fix AppleScript sheet detection/click and throttle expired Model Studio sessions to avoid repeated failed queries (2026-09-24)

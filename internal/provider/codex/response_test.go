@@ -762,20 +762,23 @@ func TestCLICredentials_UnmarshalFlat(t *testing.T) {
 
 func TestCLICredentials_EffectiveCredentials(t *testing.T) {
 	tests := []struct {
-		name    string
-		raw     string
-		wantTok string
-		wantNil bool
+		name        string
+		raw         string
+		wantTok     string
+		wantAccount string
+		wantNil     bool
 	}{
 		{
-			name:    "nested format",
-			raw:     `{"tokens": {"access_token": "nested-tok", "refresh_token": "ref"}}`,
-			wantTok: "nested-tok",
+			name:        "nested format",
+			raw:         `{"tokens": {"access_token": "nested-tok", "refresh_token": "ref", "account_id": "nested-account"}}`,
+			wantTok:     "nested-tok",
+			wantAccount: "nested-account",
 		},
 		{
-			name:    "flat format",
-			raw:     `{"access_token": "flat-tok", "refresh_token": "ref"}`,
-			wantTok: "flat-tok",
+			name:        "flat format",
+			raw:         `{"access_token": "flat-tok", "refresh_token": "ref", "account_id": "flat-account"}`,
+			wantTok:     "flat-tok",
+			wantAccount: "flat-account",
 		},
 		{
 			name:    "empty",
@@ -803,6 +806,9 @@ func TestCLICredentials_EffectiveCredentials(t *testing.T) {
 			if creds.AccessToken != tt.wantTok {
 				t.Errorf("access_token = %q, want %q", creds.AccessToken, tt.wantTok)
 			}
+			if creds.AccountID != tt.wantAccount {
+				t.Errorf("account_id = %q, want %q", creds.AccountID, tt.wantAccount)
+			}
 		})
 	}
 }
@@ -812,6 +818,7 @@ func TestCredentials_Roundtrip(t *testing.T) {
 		AccessToken:  "my-token",
 		RefreshToken: "my-refresh",
 		ExpiresAt:    "2025-02-19T22:00:00Z",
+		AccountID:    "account-123",
 	}
 
 	data, err := json.Marshal(original)

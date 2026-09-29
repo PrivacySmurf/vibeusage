@@ -151,6 +151,7 @@ type CLICredentials struct {
 	AccessToken  string             `json:"access_token,omitempty"`
 	RefreshToken string             `json:"refresh_token,omitempty"`
 	ExpiresAt    string             `json:"expires_at,omitempty"`
+	AccountID    string             `json:"account_id,omitempty"`
 }
 
 // EffectiveCredentials returns the credentials from whichever format is present.
@@ -164,6 +165,7 @@ func (c *CLICredentials) EffectiveCredentials() *oauth.Credentials {
 			AccessToken:  c.AccessToken,
 			RefreshToken: c.RefreshToken,
 			ExpiresAt:    c.ExpiresAt,
+			AccountID:    c.AccountID,
 		}
 	}
 	return nil

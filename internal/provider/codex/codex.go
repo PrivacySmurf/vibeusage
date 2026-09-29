@@ -155,7 +155,11 @@ func (s *OAuthStrategy) refreshViaCLI(ctx context.Context) *oauth.Credentials {
 
 func (s *OAuthStrategy) fetchUsage(ctx context.Context, client *httpclient.Client, usageURL string, creds *oauth.Credentials) (fetch.FetchResult, bool, error) {
 	var usageResp UsageResponse
-	resp, err := client.GetJSONCtx(ctx, usageURL, &usageResp, httpclient.WithBearer(creds.AccessToken))
+	opts := []httpclient.RequestOption{httpclient.WithBearer(creds.AccessToken)}
+	if creds.AccountID != "" {
+		opts = append(opts, httpclient.WithHeader("ChatGPT-Account-Id", creds.AccountID))
+	}
+	resp, err := client.GetJSONCtx(ctx, usageURL, &usageResp, opts...)
 	if err != nil {
 		return fetch.ResultFail("Request failed: " + err.Error()), false, nil
 	}
@@ -182,7 +186,11 @@ func (s *OAuthStrategy) fetchUsage(ctx context.Context, client *httpclient.Clien
 	if snapshot.UsageLimitResets != nil {
 		availableCount = snapshot.UsageLimitResets.AvailableCount
 	}
-	if details := s.fetchResetCreditDetails(ctx, client, usageURL, creds, usageResp.AccountID); details != nil {
+	accountID := usageResp.AccountID
+	if accountID == "" {
+		accountID = creds.AccountID
+	}
+	if details := s.fetchResetCreditDetails(ctx, client, usageURL, creds, accountID); details != nil {
 		snapshot.UsageLimitResets = usageLimitResetsFromDetails(availableCount, details)
 	}
 	if resets := snapshot.UsageLimitResets; resets != nil {

@@ -20,6 +20,7 @@ type Credentials struct {
 	AccessToken  string `json:"access_token"`
 	RefreshToken string `json:"refresh_token,omitempty"`
 	ExpiresAt    string `json:"expires_at,omitempty"` // RFC3339
+	AccountID    string `json:"account_id,omitempty"`
 }
 
 // NeedsRefresh reports whether the credentials should be refreshed.
