@@ -3,6 +3,8 @@
 ## In Progress
 
 ## Up Next
+- [ ] Add a safe Gemini CLI-owned credential refresh trigger, similar to Codex CLI refresh, without rotating the CLI's token chain independently
+- [ ] Improve Model Studio browser-session renewal or reauthentication guidance when imported cookies expire
 
 ## Completed
 - [x] Scope Codex usage requests to the active ChatGPT account, expose stale-cache fetch failures, and update mise-action workflow pins (2026-09-29)
