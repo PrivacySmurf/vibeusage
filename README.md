@@ -323,13 +323,35 @@ vibeusage auth amp
 
 [Model Studio](https://modelstudio.console.alibabacloud.com) — Alibaba Cloud's Bailian console. Reports Singapore Team/Enterprise Token Plan usage and expiration.
 
-On macOS, vibeusage automatically imports the authenticated Alibaba cookies from Chrome, Chromium, or the Codex in-app browser. Sign in to the [Singapore Team Token Plan page](https://modelstudio.console.alibabacloud.com/ap-southeast-1/?tab=plan#/efm/subscription/token-plan/enterprise), then run:
+vibeusage imports the authenticated Alibaba cookies from a signed-in browser. Sign in to the [Singapore Team Token Plan page](https://modelstudio.console.alibabacloud.com/ap-southeast-1/?tab=plan#/efm/subscription/token-plan/enterprise), then run:
 
 ```bash
 vibeusage usage modelstudio
 ```
 
-Browser imports are scoped to the Model Studio console host and happen only while fetching this provider. Chrome/Chromium may ask for access to its Safe Storage Keychain item. When an imported session expires, sign in again in the same browser and retry; vibeusage re-imports it automatically.
+The preferred source is any Chrome/Chromium started with `--remote-debugging-port`: cookies are read live over the DevTools Protocol, with no cookie-database copy and no Keychain prompt, on every platform. Port `9222` is probed by default; list your own ports in priority order with `cdp_ports` (or the `VIBEUSAGE_CDP_PORTS` env var, comma-separated):
+
+```toml
+[providers.modelstudio]
+cdp_ports = [9444, 9222]
+```
+
+On macOS, browsers that wrote a `DevToolsActivePort` file are probed too, and as a last resort the Chrome, Chromium, or Codex in-app browser cookie database can be decrypted when `VIBEUSAGE_ALLOW_KEYCHAIN=1` is set (Chrome may then ask for access to its Safe Storage Keychain item).
+
+Browser imports are scoped to the Model Studio console host and happen only while fetching this provider. When an imported session expires, sign in again in one of those browsers and retry; vibeusage re-imports it automatically. The error message lists every browser it checked.
+
+**Automatic sign-in.** The console session expires on Alibaba's schedule. To renew it without touching a browser, give vibeusage a command that prints the account credentials and a *visible* remote-debugging Chrome to sign in on:
+
+```toml
+[providers.modelstudio]
+cdp_ports = [9444, 9222]
+login_port = 9444   # defaults to the first cdp_ports entry
+login_command = "op item get 'Alibaba Cloud' --vault Dev --fields label=username,label=password --format json"
+```
+
+The command runs with `sh -c` and may print either a JSON object (`username`/`email` and `password`) or the field array `op item get --format json` emits. When no browser holds a live session, vibeusage opens the sign-in page in a new tab on `login_port`, fills the form, waits for the console redirect, closes the tab, and re-imports the cookies. Credentials go from the command's stdout straight into the page; nothing is stored. Sign-in is attempted at most once per 10 minutes, whatever the outcome, and never runs unless `login_command` is set.
+
+If Alibaba's risk control shows a slider captcha (it does after many logins in a short span), the fetch fails with a message saying so and saves a screenshot at `<cache dir>/modelstudio-login-failure.png`; sign in manually once in that browser window and automatic renewal resumes.
 
 For unsupported platforms or browser profiles, `vibeusage auth modelstudio` accepts the complete `Cookie` request-header value as a manual fallback. `MODELSTUDIO_COOKIE` remains an explicit override and is never replaced automatically.
 

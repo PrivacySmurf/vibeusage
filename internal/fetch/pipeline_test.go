@@ -1724,3 +1724,34 @@ func TestExecutePipeline_ThrottleSaveErrorWarns(t *testing.T) {
 		}
 	}
 }
+
+type extendingStrategy struct {
+	extend   time.Duration
+	observed time.Duration
+}
+
+func (s *extendingStrategy) IsAvailable() bool { return true }
+func (s *extendingStrategy) ExtendTimeout(base time.Duration) time.Duration {
+	return base + s.extend
+}
+func (s *extendingStrategy) Fetch(ctx context.Context) (FetchResult, error) {
+	if deadline, ok := ctx.Deadline(); ok {
+		s.observed = time.Until(deadline)
+	}
+	return ResultFail("nope"), nil
+}
+
+func TestPipelineHonorsTimeoutExtender(t *testing.T) {
+	strategy := &extendingStrategy{extend: 90 * time.Second}
+	cfg := PipelineConfig{Timeout: 5 * time.Second}
+	_ = ExecutePipeline(context.Background(), "ext", []Strategy{strategy}, false, cfg)
+	if strategy.observed < 80*time.Second {
+		t.Errorf("attempt deadline = %v, want roughly 95s", strategy.observed)
+	}
+
+	shrinking := &extendingStrategy{extend: -3 * time.Second}
+	_ = ExecutePipeline(context.Background(), "ext", []Strategy{shrinking}, false, cfg)
+	if shrinking.observed > 5*time.Second || shrinking.observed < 4*time.Second {
+		t.Errorf("a smaller extension must not shrink the timeout: %v", shrinking.observed)
+	}
+}

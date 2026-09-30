@@ -95,7 +95,13 @@ func ExecutePipeline(ctx context.Context, providerID string, strategies []Strate
 
 		anyAttempted = true
 
-		attemptCtx, cancel := context.WithTimeout(ctx, cfg.Timeout)
+		timeout := cfg.Timeout
+		if extender, ok := strategy.(TimeoutExtender); ok {
+			if extended := extender.ExtendTimeout(timeout); extended > timeout {
+				timeout = extended
+			}
+		}
+		attemptCtx, cancel := context.WithTimeout(ctx, timeout)
 		result, fetchErr := strategy.Fetch(attemptCtx)
 		attemptErr := attemptCtx.Err()
 		cancel()

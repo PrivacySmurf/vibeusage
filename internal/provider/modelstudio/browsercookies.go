@@ -7,6 +7,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/joshuadavidthomas/vibeusage/internal/config"
 )
 
 var errBrowserCookieImportUnavailable = errors.New("browser cookie import unavailable")
@@ -30,6 +32,20 @@ var (
 	importModelStudioBrowserSession = platformImportModelStudioBrowserSession
 	hasModelStudioBrowserProfiles   = platformHasModelStudioBrowserProfiles
 )
+
+// configuredCDPPorts reads [providers.modelstudio] cdp_ports from config.
+func configuredCDPPorts() []int {
+	return config.Get().Providers["modelstudio"].CDPPorts
+}
+
+// hasConfiguredCDPPorts reports whether the user explicitly pointed vibeusage
+// at a remote-debugging browser (env or config). The implicit 9222 default
+// does not count, so the provider is not advertised as available on machines
+// that never set anything up.
+func hasConfiguredCDPPorts() bool {
+	_, explicit := cdpFixedPorts(configuredCDPPorts())
+	return explicit
+}
 
 func buildModelStudioCookieHeader(cookies []browserCookie, targetURL string, now time.Time) (string, error) {
 	target, err := url.Parse(targetURL)

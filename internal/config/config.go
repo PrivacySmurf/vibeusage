@@ -34,6 +34,23 @@ type HistoryConfig struct {
 type ProviderConfig struct {
 	Enabled     *bool  `toml:"enabled,omitempty" json:"enabled,omitempty"`
 	WorkspaceID string `toml:"workspace_id,omitempty" json:"workspace_id,omitempty"`
+	// CDPPorts lists local Chrome DevTools Protocol ports to probe for a
+	// signed-in browser session (Model Studio). Order is priority order.
+	CDPPorts []int `toml:"cdp_ports,omitempty" json:"cdp_ports,omitempty"`
+	// LoginCommand, when set, is run with `sh -c` to obtain sign-in
+	// credentials (JSON with username/password, or `op item get --format json`
+	// field output) so an expired browser session can be renewed automatically.
+	LoginCommand string `toml:"login_command,omitempty" json:"login_command,omitempty"`
+	// LoginPort is the headed CDP port the automatic sign-in is driven on.
+	// Defaults to the first entry of CDPPorts.
+	LoginPort int `toml:"login_port,omitempty" json:"login_port,omitempty"`
+}
+
+// isZero reports whether every field is unset, so an empty provider table
+// can be dropped from the written config.
+func (pc ProviderConfig) isZero() bool {
+	return pc.Enabled == nil && pc.WorkspaceID == "" && len(pc.CDPPorts) == 0 &&
+		pc.LoginCommand == "" && pc.LoginPort == 0
 }
 
 type RoleConfig struct {
@@ -74,6 +91,11 @@ func (c Config) clone() Config {
 	out := c
 	out.Providers = make(map[string]ProviderConfig, len(c.Providers))
 	for k, v := range c.Providers {
+		if len(v.CDPPorts) > 0 {
+			ports := make([]int, len(v.CDPPorts))
+			copy(ports, v.CDPPorts)
+			v.CDPPorts = ports
+		}
 		out.Providers[k] = v
 	}
 	out.Roles = make(map[string]RoleConfig, len(c.Roles))
@@ -115,7 +137,7 @@ func SetProvidersEnabled(states map[string]bool) error {
 				continue
 			}
 			pc.Enabled = nil
-			if pc == (ProviderConfig{}) {
+			if pc.isZero() {
 				delete(cfg.Providers, providerID)
 			} else {
 				cfg.Providers[providerID] = pc

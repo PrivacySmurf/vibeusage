@@ -113,6 +113,15 @@ type Strategy interface {
 	Fetch(ctx context.Context) (FetchResult, error)
 }
 
+// TimeoutExtender is optionally implemented by strategies whose Fetch may
+// legitimately need longer than the configured per-attempt timeout (for
+// example, driving a browser sign-in before the real request). The pipeline
+// calls it with the configured timeout and uses the returned value when it
+// is larger.
+type TimeoutExtender interface {
+	ExtendTimeout(base time.Duration) time.Duration
+}
+
 // StrategyName returns a short identifier for a strategy derived from its
 // type name (e.g. *claude.OAuthStrategy → "oauth").
 func StrategyName(s Strategy) string {

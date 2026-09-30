@@ -160,49 +160,122 @@ func (s *WebConsoleStrategy) fetchImportedBrowserSession(
 	client *httpclient.Client,
 	previous sessionCredentials,
 ) (fetch.FetchResult, error) {
-	imported, importErr := importModelStudioBrowserSession(ctx)
-	if importErr != nil {
-		return fetch.ResultThrottled(modelStudioSessionHint(previous, importErr), time.Now().Add(modelStudioSessionCooldown)), nil
-	}
-
-	creds := sessionCredentials{
-		Cookie:       imported.Cookie,
-		Source:       sessionSourceBrowser,
-		BrowserLabel: imported.SourceLabel,
-	}
-	snapshot, err := s.fetchWithSession(ctx, client, creds)
-	if err != nil {
-		if errors.Is(err, errModelStudioSession) {
-			return fetch.ResultThrottled(modelStudioSessionHint(creds, nil), time.Now().Add(modelStudioSessionCooldown)), nil
+	loginAttempted := false
+	for {
+		imported, importErr := importModelStudioBrowserSession(ctx)
+		if importErr != nil {
+			if !loginAttempted {
+				loginAttempted = true
+				if loginErr := s.autoLogin(ctx); loginErr == nil {
+					continue
+				} else if !errors.Is(loginErr, errAutoLoginUnavailable) {
+					importErr = fmt.Errorf("%w; automatic sign-in failed: %v", importErr, loginErr)
+				}
+			}
+			return fetch.ResultThrottled(modelStudioSessionHint(previous, importErr), time.Now().Add(modelStudioSessionCooldown)), nil
 		}
-		return fetch.ResultFail(fmt.Sprintf("Model Studio web console API failed after importing %s cookies: %v", imported.SourceLabel, err)), nil
-	}
 
-	// Cache only a browser-imported session that has completed an authenticated
-	// quota request. The credentials store is permission-restricted to the user.
-	if data, err := json.Marshal(creds); err == nil {
-		_ = config.WriteCredential("modelstudio", "session", data)
+		creds := sessionCredentials{
+			Cookie:       imported.Cookie,
+			Source:       sessionSourceBrowser,
+			BrowserLabel: imported.SourceLabel,
+		}
+		snapshot, err := s.fetchWithSession(ctx, client, creds)
+		if err != nil {
+			if !errors.Is(err, errModelStudioSession) {
+				return fetch.ResultFail(fmt.Sprintf("Model Studio web console API failed after importing %s cookies: %v", imported.SourceLabel, err)), nil
+			}
+			// The browser holds a session, but the console no longer accepts it.
+			var loginErr error
+			if !loginAttempted {
+				loginAttempted = true
+				if loginErr = s.autoLogin(ctx); loginErr == nil {
+					continue
+				}
+			}
+			var hintErr error
+			if loginErr != nil && !errors.Is(loginErr, errAutoLoginUnavailable) {
+				hintErr = fmt.Errorf("automatic sign-in failed: %w", loginErr)
+			}
+			return fetch.ResultThrottled(modelStudioSessionHint(creds, hintErr), time.Now().Add(modelStudioSessionCooldown)), nil
+		}
+
+		// Cache only a browser-imported session that has completed an authenticated
+		// quota request. The credentials store is permission-restricted to the user.
+		if data, err := json.Marshal(creds); err == nil {
+			_ = config.WriteCredential("modelstudio", "session", data)
+		}
+		return fetch.ResultOK(*snapshot), nil
 	}
-	return fetch.ResultOK(*snapshot), nil
 }
 
+// autoLogin renews the browser session through the configured login_command
+// and headed CDP port. It returns errAutoLoginUnavailable when not configured.
+func (s *WebConsoleStrategy) autoLogin(ctx context.Context) error {
+	command, port, err := autoLoginSettings()
+	if err != nil {
+		return err
+	}
+	if last := lastLoginAttempt(); !last.IsZero() && time.Since(last) < loginCooldown {
+		return fmt.Errorf("%w (%s ago); next attempt after %s",
+			errAutoLoginCoolingDown, time.Since(last).Round(time.Second), loginCooldown)
+	}
+	recordLoginAttempt(time.Now())
+	creds, err := loadLoginCredentials(ctx, command)
+	if err != nil {
+		return err
+	}
+	return autoLoginModelStudio(ctx, port, creds)
+}
+
+// ExtendTimeout gives Fetch room for a browser sign-in on top of the normal
+// request budget, but only when automatic sign-in is configured.
+func (s *WebConsoleStrategy) ExtendTimeout(base time.Duration) time.Duration {
+	if _, _, err := autoLoginSettings(); err != nil {
+		return base
+	}
+	return base + loginOverallDeadline
+}
+
+// modelStudioSessionHint explains why no usable session exists and exactly
+// where to sign in so the next run can pick the cookies up automatically.
+// importErr, when present, carries the list of browsers that were probed.
 func modelStudioSessionHint(creds sessionCredentials, importErr error) string {
-	switch creds.Source {
-	case sessionSourceEnvironment:
+	if creds.Source == sessionSourceEnvironment {
 		return "Model Studio browser session expired. Update MODELSTUDIO_COOKIE with a fresh Cookie header."
-	case sessionSourceManual:
-		return "Model Studio browser session expired. Sign in to the Singapore Team Token Plan page in Chrome or the Codex in-app browser, then retry; vibeusage will import fresh cookies automatically. You can also run vibeusage auth modelstudio to replace the Cookie header manually."
-	case sessionSourceBrowser:
-		browser := creds.BrowserLabel
-		if browser == "" {
-			browser = "your browser"
-		}
-		return fmt.Sprintf("Model Studio browser session expired. Sign in again in %s, then retry; vibeusage will re-import the cookies automatically.", browser)
 	}
-	if importErr != nil {
-		return "No signed-in Model Studio browser session was found. Sign in to the Singapore Team Token Plan page in Chrome or the Codex in-app browser, then retry. If automatic cookie import is unavailable, run vibeusage auth modelstudio to paste the Cookie header manually."
+
+	var b strings.Builder
+	switch {
+	case creds.Source == sessionSourceBrowser && creds.BrowserLabel != "":
+		fmt.Fprintf(&b, "Model Studio browser session expired (last imported from %s).", creds.BrowserLabel)
+	case creds.Source == "" && importErr != nil:
+		b.WriteString("No signed-in Model Studio browser session was found.")
+	default:
+		b.WriteString("Model Studio browser session expired.")
 	}
-	return "Model Studio browser session expired. Sign in to the Singapore Team Token Plan page, then retry."
+	b.WriteString(" Sign in to the Singapore Team Token Plan page (")
+	b.WriteString(modelStudioDashboardURL)
+	b.WriteString(") in a browser vibeusage can read, then retry; the cookies are imported automatically.")
+	if detail := browserImportDetail(importErr); detail != "" {
+		b.WriteString(" Last import attempt: ")
+		b.WriteString(detail)
+		b.WriteString(".")
+	}
+	b.WriteString(" Readable browsers: any Chrome started with --remote-debugging-port (set cdp_ports under [providers.modelstudio] or VIBEUSAGE_CDP_PORTS), or run vibeusage auth modelstudio to paste the Cookie header manually.")
+	return b.String()
+}
+
+// browserImportDetail strips the generic sentinel prefix from an import error
+// so only the specific, user-actionable part is shown.
+func browserImportDetail(importErr error) string {
+	if importErr == nil {
+		return ""
+	}
+	detail := strings.TrimSpace(importErr.Error())
+	detail = strings.TrimPrefix(detail, errBrowserCookieImportUnavailable.Error())
+	detail = strings.TrimLeft(detail, ":; ")
+	return strings.TrimSuffix(detail, ".")
 }
 
 func (s *WebConsoleStrategy) resolveSECToken(
