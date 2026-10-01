@@ -435,6 +435,26 @@ vibeusage auth kimicode
 
 Also picks up `KIMI_CODE_API_KEY` if set.
 
+#### Xiaomi MiMo
+
+[platform.xiaomimimo.com](https://platform.xiaomimimo.com) — Xiaomi MiMo AI platform and token plans. Reports account balance and token plan quota utilization.
+
+vibeusage automatically imports session cookies from a signed-in browser (Chrome DevTools Protocol on port `9222`/`9444`, or local browser profiles). Sign in to the [Xiaomi MiMo console](https://platform.xiaomimimo.com/#/console/balance) in your browser, then run:
+
+```bash
+vibeusage usage mimo
+```
+
+When an imported session expires, signing in again in your browser allows vibeusage to re-import it automatically.
+
+You can also authenticate manually by running:
+
+```bash
+vibeusage auth mimo
+```
+
+and pasting the session cookies (`api-platform_serviceToken` and `userId`), or by setting `MIMO_COOKIE` in your environment.
+
 #### Minimax
 
 [minimax.io](https://www.minimax.io) — Minimax AI coding assistant. Reports per-model usage against your coding plan limits.

@@ -1,0 +1,217 @@
+package mimo
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"net/http"
+	"os"
+	"strings"
+	"time"
+
+	"github.com/joshuadavidthomas/vibeusage/internal/config"
+	"github.com/joshuadavidthomas/vibeusage/internal/fetch"
+	"github.com/joshuadavidthomas/vibeusage/internal/httpclient"
+	"github.com/joshuadavidthomas/vibeusage/internal/models"
+)
+
+const (
+	defaultBaseURL   = "https://platform.xiaomimimo.com/api/v1"
+	browserUserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36"
+)
+
+type WebConsoleStrategy struct {
+	HTTPTimeout float64
+	BaseURL     string
+}
+
+type sessionCredentials struct {
+	Cookie       string `json:"cookie"`
+	Source       string `json:"source,omitempty"`
+	BrowserLabel string `json:"browser,omitempty"`
+}
+
+const (
+	sessionSourceEnvironment = "environment"
+	sessionSourceManual      = "manual"
+	sessionSourceBrowser     = "browser"
+)
+
+func getAPIBaseURL(override string) string {
+	if override != "" {
+		return strings.TrimRight(override, "/")
+	}
+	if env := os.Getenv("MIMO_API_URL"); env != "" {
+		return strings.TrimRight(env, "/")
+	}
+	return defaultBaseURL
+}
+
+func loadSessionCredential() (sessionCredentials, error) {
+	if envCookie := strings.TrimSpace(os.Getenv("MIMO_COOKIE")); envCookie != "" {
+		return sessionCredentials{Cookie: envCookie, Source: sessionSourceEnvironment}, nil
+	}
+
+	data, err := config.ReadCredential("mimo", "session")
+	if err != nil || len(data) == 0 {
+		return sessionCredentials{}, err
+	}
+
+	var creds sessionCredentials
+	if err := json.Unmarshal(data, &creds); err == nil && creds.Cookie != "" {
+		if creds.Source == "" {
+			creds.Source = sessionSourceManual
+		}
+		return creds, nil
+	}
+	return sessionCredentials{Cookie: strings.TrimSpace(string(data)), Source: sessionSourceManual}, nil
+}
+
+func (s *WebConsoleStrategy) IsAvailable() bool {
+	if cookie := os.Getenv("MIMO_COOKIE"); cookie != "" {
+		return true
+	}
+	data, err := config.ReadCredential("mimo", "session")
+	return (err == nil && len(data) > 0) || hasMimoBrowserProfiles()
+}
+
+func (s *WebConsoleStrategy) Fetch(ctx context.Context) (fetch.FetchResult, error) {
+	creds, err := loadSessionCredential()
+	if err != nil {
+		return fetch.ResultFail(fmt.Sprintf("Xiaomi MiMo: reading stored browser session: %v", err)), nil
+	}
+
+	timeout := s.HTTPTimeout
+	if timeout <= 0 {
+		timeout = config.Get().Fetch.Timeout
+	}
+	if timeout <= 0 {
+		timeout = 15.0
+	}
+	client := httpclient.NewFromConfig(timeout)
+
+	if creds.Cookie == "" {
+		return s.fetchImportedBrowserSession(ctx, client, sessionCredentials{})
+	}
+
+	snapshot, err := s.fetchWithSession(ctx, client, creds.Cookie)
+	if err == nil {
+		return fetch.ResultOK(*snapshot), nil
+	}
+	if !errors.Is(err, errSessionExpired) {
+		return fetch.ResultFail(fmt.Sprintf("Xiaomi MiMo web console API failed: %v", err)), nil
+	}
+	if creds.Source == sessionSourceEnvironment {
+		return fetch.ResultFatal(mimoSessionHint(creds, errBrowserCookieImportUnavailable)), nil
+	}
+
+	return s.fetchImportedBrowserSession(ctx, client, creds)
+}
+
+func (s *WebConsoleStrategy) fetchWithSession(
+	ctx context.Context,
+	client *httpclient.Client,
+	cookie string,
+) (*models.UsageSnapshot, error) {
+	baseURL := getAPIBaseURL(s.BaseURL)
+
+	reqHeaders := []httpclient.RequestOption{
+		httpclient.WithHeader("Accept", "application/json, text/plain, */*"),
+		httpclient.WithHeader("Cookie", cookie),
+		httpclient.WithHeader("Accept-Language", "en-US,en;q=0.9"),
+		httpclient.WithHeader("x-timeZone", "UTC"),
+		httpclient.WithHeader("Origin", "https://platform.xiaomimimo.com"),
+		httpclient.WithHeader("Referer", "https://platform.xiaomimimo.com/#/console/balance"),
+		httpclient.WithHeader("User-Agent", browserUserAgent),
+	}
+
+	// 1. Fetch balance
+	balanceURL := baseURL + "/balance"
+	balResp, err := client.DoCtx(ctx, http.MethodGet, balanceURL, nil, reqHeaders...)
+	if err != nil {
+		return nil, fmt.Errorf("balance request failed: %w", err)
+	}
+
+	if balResp.StatusCode == http.StatusUnauthorized || balResp.StatusCode == http.StatusForbidden {
+		return nil, errSessionExpired
+	}
+	if balResp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("balance request returned HTTP %d", balResp.StatusCode)
+	}
+
+	balanceBytes := balResp.Body
+
+	// 2. Fetch token plan detail (optional, non-fatal)
+	detailURL := baseURL + "/tokenPlan/detail"
+	var detailBytes []byte
+	if detailResp, err := client.DoCtx(ctx, http.MethodGet, detailURL, nil, reqHeaders...); err == nil && detailResp.StatusCode == http.StatusOK {
+		detailBytes = detailResp.Body
+	}
+
+	// 3. Fetch token plan usage (optional, non-fatal)
+	usageURL := baseURL + "/tokenPlan/usage"
+	var usageBytes []byte
+	if usageResp, err := client.DoCtx(ctx, http.MethodGet, usageURL, nil, reqHeaders...); err == nil && usageResp.StatusCode == http.StatusOK {
+		usageBytes = usageResp.Body
+	}
+
+	return parseSnapshot(balanceBytes, detailBytes, usageBytes, time.Now())
+}
+
+func (s *WebConsoleStrategy) fetchImportedBrowserSession(
+	ctx context.Context,
+	client *httpclient.Client,
+	previous sessionCredentials,
+) (fetch.FetchResult, error) {
+	imported, importErr := importMimoBrowserSession(ctx)
+	if importErr != nil {
+		return fetch.ResultFatal(mimoSessionHint(previous, importErr)), nil
+	}
+
+	creds := sessionCredentials{
+		Cookie:       imported.Cookie,
+		Source:       sessionSourceBrowser,
+		BrowserLabel: imported.SourceLabel,
+	}
+
+	snapshot, err := s.fetchWithSession(ctx, client, creds.Cookie)
+	if err != nil {
+		if !errors.Is(err, errSessionExpired) {
+			return fetch.ResultFail(fmt.Sprintf("Xiaomi MiMo web console API failed after importing %s cookies: %v", imported.SourceLabel, err)), nil
+		}
+		return fetch.ResultFatal(mimoSessionHint(creds, err)), nil
+	}
+
+	// Cache successfully authenticated browser-imported session
+	if data, err := json.Marshal(creds); err == nil {
+		_ = config.WriteCredential("mimo", "session", data)
+	}
+
+	return fetch.ResultOK(*snapshot), nil
+}
+
+func mimoSessionHint(creds sessionCredentials, reason error) string {
+	var sb strings.Builder
+	switch creds.Source {
+	case sessionSourceEnvironment:
+		sb.WriteString("Xiaomi MiMo: MIMO_COOKIE session expired or is invalid.")
+	case sessionSourceBrowser:
+		if creds.BrowserLabel != "" {
+			fmt.Fprintf(&sb, "Xiaomi MiMo: session imported from %s session expired or is invalid.", creds.BrowserLabel)
+		} else {
+			sb.WriteString("Xiaomi MiMo: browser session expired or is invalid.")
+		}
+	default:
+		sb.WriteString("Xiaomi MiMo: session expired or no authenticated session found.")
+	}
+
+	if reason != nil && !errors.Is(reason, errBrowserCookieImportUnavailable) {
+		sb.WriteString(" (")
+		sb.WriteString(reason.Error())
+		sb.WriteString(")")
+	}
+
+	sb.WriteString("\nSign in to https://platform.xiaomimimo.com/#/console/balance in your browser (or CDP fleet on port 9444), or update credentials with 'vibeusage auth mimo'.")
+	return sb.String()
+}
