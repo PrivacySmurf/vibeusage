@@ -7,6 +7,7 @@
 - [ ] Confirm Model Studio automatic sign-in renews the session unattended at the next natural expiry (after clearing the slider captcha with one manual login on 9444)
 
 ## Completed
+- [x] Implement Xiaomi MiMo provider for balance and token plan usage with CDP and browser cookie auto-import (2026-10-01)
 - [x] Scope Codex usage requests to the active ChatGPT account, expose stale-cache fetch failures, and update mise-action workflow pins (2026-09-29)
 - [x] Fix post-reboot Claude and Model Studio credential state, extract active session cookies from Chrome CDP, and configure persistent launchd service for DSH Computer Use CUADaemon (2026-09-26)
 - [x] Fix Claude OAuth 429 refresh handling, select Keychain credentials over stale file tokens, preserve authentic provider source in JSON output, and support non-invasive background CDP profiles for Model Studio (2026-09-26)
