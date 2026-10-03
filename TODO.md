@@ -3,10 +3,14 @@
 ## In Progress
 
 ## Up Next
-- [ ] Add a safe Gemini CLI-owned credential refresh trigger, similar to Codex CLI refresh, without rotating the CLI's token chain independently
 - [ ] Confirm Model Studio automatic sign-in renews the session unattended at the next natural expiry (after clearing the slider captcha with one manual login on 9444)
+- [ ] Install Gemini CLI to enable standalone Gemini token refresh (currently covered by Antigravity's Gemini model group)
 
 ## Completed
+- [x] Full provider automation: binary path resolution, MiMo CDP auto-login, Claude exponential backoff with CLI health probe (2026-10-03)
+- [x] Add executil.ResolveBinary for fallback CLI discovery (~/.local/bin, /opt/homebrew/bin) — fixes Antigravity, Claude, Codex, Gemini (2026-10-03)
+- [x] MiMo CDP auto-login via Xiaomi SSO — navigates to platform, imports cookies from active tab, no form-filling needed (2026-10-03)
+- [x] Claude exponential backoff on consecutive 429s (60s→4h cap) with HealthProber CLI probe at ≥5 failures (2026-10-03)
 - [x] Implement Xiaomi MiMo provider for balance and token plan usage with CDP and browser cookie auto-import (2026-10-01)
 - [x] Scope Codex usage requests to the active ChatGPT account, expose stale-cache fetch failures, and update mise-action workflow pins (2026-09-29)
 - [x] Fix post-reboot Claude and Model Studio credential state, extract active session cookies from Chrome CDP, and configure persistent launchd service for DSH Computer Use CUADaemon (2026-09-26)
