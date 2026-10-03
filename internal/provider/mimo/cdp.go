@@ -431,3 +431,83 @@ func (c *cdpConn) readFrame() (byte, []byte, error) {
 	}
 	return opcode, buf, nil
 }
+
+// --- CDP target management for auto-login ---
+
+type cdpTarget struct {
+	ID                   string `json:"id"`
+	WebSocketDebuggerURL string `json:"webSocketDebuggerUrl"`
+}
+
+func (t cdpTarget) wsPath() string {
+	if parsed, err := url.Parse(t.WebSocketDebuggerURL); err == nil && parsed.Path != "" {
+		return parsed.Path
+	}
+	return "/devtools/page/" + t.ID
+}
+
+func openCDPTarget(ctx context.Context, port, pageURL string) (cdpTarget, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, "http://127.0.0.1:"+port+"/json/new?"+pageURL, nil)
+	if err != nil {
+		return cdpTarget{}, err
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return cdpTarget{}, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		return cdpTarget{}, fmt.Errorf("/json/new status %d", resp.StatusCode)
+	}
+	var target cdpTarget
+	if err := json.NewDecoder(resp.Body).Decode(&target); err != nil {
+		return cdpTarget{}, err
+	}
+	if target.ID == "" {
+		return cdpTarget{}, errors.New("/json/new returned no target id")
+	}
+	return target, nil
+}
+
+func closeCDPTarget(port, id string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://127.0.0.1:"+port+"/json/close/"+id, nil)
+	if err != nil {
+		return
+	}
+	if resp, err := http.DefaultClient.Do(req); err == nil {
+		_ = resp.Body.Close()
+	}
+}
+
+// evalInContext runs expression in executionContextId (0 = page default)
+// and decodes its by-value result into out.
+func (c *cdpConn) evalInContext(contextID int, expression string, out any) error {
+	params := map[string]any{
+		"expression":    expression,
+		"returnByValue": true,
+		"awaitPromise":  true,
+	}
+	if contextID != 0 {
+		params["contextId"] = contextID
+	}
+	var res struct {
+		Result struct {
+			Value json.RawMessage `json:"value"`
+		} `json:"result"`
+		ExceptionDetails *struct {
+			Text string `json:"text"`
+		} `json:"exceptionDetails"`
+	}
+	if err := c.call("Runtime.evaluate", params, &res); err != nil {
+		return err
+	}
+	if res.ExceptionDetails != nil {
+		return fmt.Errorf("page script error: %s", res.ExceptionDetails.Text)
+	}
+	if out == nil || len(res.Result.Value) == 0 {
+		return nil
+	}
+	return json.Unmarshal(res.Result.Value, out)
+}

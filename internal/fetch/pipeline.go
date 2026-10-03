@@ -37,33 +37,46 @@ func ExecutePipeline(ctx context.Context, providerID string, strategies []Strate
 			marker = nil
 		}
 		if marker != nil {
-			if cfg.Cache != nil {
-				cached, err := cfg.Cache.Load(providerID)
-				if ctx.Err() != nil {
-					return contextCancelledOutcome(providerID)
+			// When backoff is deep (≥5 consecutive failures), try a health
+			// probe to detect early recovery before the full backoff expires.
+			if marker.ConsecutiveFailures >= 5 {
+				if probed := probeStrategies(ctx, strategies, cfg.Timeout); probed {
+					logger.Info("health probe succeeded, clearing throttle", "provider", providerID, "consecutive_failures", marker.ConsecutiveFailures)
+					if cfg.Throttles != nil {
+						_ = cfg.Throttles.Clear(providerID)
+					}
+					marker = nil // fall through to normal fetch
 				}
-				if err != nil {
-					logger.Warn("loading cached snapshot failed", "provider", providerID, "err", err)
-					cached = nil
-				}
-				if cachedSnapshotMatchesProvider(cached, providerID) {
-					return FetchOutcome{
-						ProviderID: providerID,
-						Success:    true,
-						Snapshot:   cached,
-						Source:     "cache (throttled)",
-						Cached:     true,
+			}
+			if marker != nil {
+				if cfg.Cache != nil {
+					cached, err := cfg.Cache.Load(providerID)
+					if ctx.Err() != nil {
+						return contextCancelledOutcome(providerID)
+					}
+					if err != nil {
+						logger.Warn("loading cached snapshot failed", "provider", providerID, "err", err)
+						cached = nil
+					}
+					if cachedSnapshotMatchesProvider(cached, providerID) {
+						return FetchOutcome{
+							ProviderID: providerID,
+							Success:    true,
+							Snapshot:   cached,
+							Source:     "cache (throttled)",
+							Cached:     true,
+						}
 					}
 				}
-			}
-			reason := marker.Reason
-			if reason == "" {
-				reason = "Rate limited"
-			}
-			return FetchOutcome{
-				ProviderID: providerID,
-				Success:    false,
-				Error:      fmt.Sprintf("%s; retry after %s", reason, marker.RetryAt.Format(time.RFC3339)),
+				reason := marker.Reason
+				if reason == "" {
+					reason = "Rate limited"
+				}
+				return FetchOutcome{
+					ProviderID: providerID,
+					Success:    false,
+					Error:      fmt.Sprintf("%s; retry after %s (%d consecutive failures)", reason, marker.RetryAt.Format(time.RFC3339), marker.ConsecutiveFailures),
+				}
 			}
 		}
 	}
@@ -226,6 +239,26 @@ func hasAvailableStrategy(strategies []Strategy) bool {
 		if strategy.IsAvailable() {
 			return true
 		}
+	}
+	return false
+}
+
+// probeStrategies checks if any available strategy implements HealthProber
+// and runs the probe. Returns true if the health probe succeeds (indicating
+// the rate limit has cleared).
+func probeStrategies(ctx context.Context, strategies []Strategy, timeout time.Duration) bool {
+	for _, strategy := range strategies {
+		if !strategy.IsAvailable() {
+			continue
+		}
+		prober, ok := strategy.(HealthProber)
+		if !ok {
+			continue
+		}
+		probeCtx, cancel := context.WithTimeout(ctx, timeout)
+		result := prober.ProbeHealth(probeCtx)
+		cancel()
+		return result
 	}
 	return false
 }

@@ -41,6 +41,24 @@ func (s *OAuthStrategy) externalPaths() []string {
 	return []string{filepath.Join(home, ".gemini", "oauth_creds.json")}
 }
 
+// refreshViaCLI spawns the Gemini CLI to trigger a token refresh. The CLI
+// owns the rotating OAuth chain in ~/.gemini/oauth_creds.json; running it
+// with a lightweight prompt causes it to refresh expired tokens on disk.
+func (s *OAuthStrategy) refreshViaCLI(ctx context.Context) *oauth.Credentials {
+	return oauth.RefreshViaCLI(ctx, oauth.CLIRefreshConfig{
+		BinaryName: "gemini",
+		Args: []string{
+			"-p", "ok",
+			"--model", "gemini-2.0-flash",
+			"--output-format", "text",
+			"--sandbox", "read-only",
+		},
+		LoadCredentials: func() *oauth.Credentials {
+			return s.loadCredentials()
+		},
+	})
+}
+
 func (s *OAuthStrategy) Fetch(ctx context.Context) (fetch.FetchResult, error) {
 	creds := s.loadCredentials()
 	if creds == nil {
@@ -52,12 +70,12 @@ func (s *OAuthStrategy) Fetch(ctx context.Context) (fetch.FetchResult, error) {
 	}
 
 	if creds.NeedsRefresh() {
-		// The Gemini CLI owns the rotating chain in ~/.gemini/oauth_creds.json,
-		// and a refresh request to Google's token endpoint may rotate the
-		// refresh token server-side — invalidating the CLI's stored copy and
-		// breaking its next refresh. Fail closed and let the user re-run the
-		// CLI, which will refresh on its own terms.
-		return fetch.ResultFail("OAuth token expired. Run the Gemini CLI (e.g. `gemini`) to refresh credentials, then retry."), nil
+		refreshed := s.refreshViaCLI(ctx)
+		if refreshed != nil {
+			creds = refreshed
+		} else {
+			return fetch.ResultFail("OAuth token expired. Run the Gemini CLI (e.g. `gemini`) to refresh credentials, then retry."), nil
+		}
 	}
 
 	quotaResp, codeAssistResp, fetchErr := s.fetchQuotaData(ctx, creds.AccessToken)

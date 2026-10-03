@@ -1946,7 +1946,7 @@ func TestSaveAndLoadThrottle(t *testing.T) {
 	}
 }
 
-func TestLoadThrottle_ExpiredIsDeleted(t *testing.T) {
+func TestLoadThrottle_ExpiredReturnsNilButPreservesFile(t *testing.T) {
 	setupTempDir(t)
 
 	past := time.Now().Add(-1 * time.Minute).UTC()
@@ -1962,8 +1962,94 @@ func TestLoadThrottle_ExpiredIsDeleted(t *testing.T) {
 		t.Errorf("expected nil for expired marker, got %+v", m)
 	}
 
-	if _, err := os.Stat(ThrottlePath("claude")); !os.IsNotExist(err) {
-		t.Error("expected expired throttle file to be removed on load")
+	// File is preserved so SaveThrottle can read consecutive failures for backoff.
+	if _, err := os.Stat(ThrottlePath("claude")); os.IsNotExist(err) {
+		t.Error("expected expired throttle file to be preserved for backoff counting")
+	}
+}
+
+func TestSaveThrottle_ExponentialBackoff(t *testing.T) {
+	setupTempDir(t)
+
+	// First failure: marker saved with near-future RetryAt
+	marker1 := fetch.ThrottleMarker{RetryAt: time.Now().Add(100 * time.Millisecond), Reason: "rate limited"}
+	if err := SaveThrottle("claude", marker1); err != nil {
+		t.Fatalf("SaveThrottle error: %v", err)
+	}
+	m1, _ := LoadThrottle("claude")
+	if m1 == nil {
+		t.Fatal("expected marker after first save")
+	}
+	if m1.ConsecutiveFailures != 1 {
+		t.Errorf("expected 1 consecutive failure, got %d", m1.ConsecutiveFailures)
+	}
+
+	// Wait for marker to expire
+	time.Sleep(150 * time.Millisecond)
+
+	// Second failure: backoff should extend RetryAt beyond the original
+	marker2 := fetch.ThrottleMarker{RetryAt: time.Now().Add(100 * time.Millisecond), Reason: "rate limited"}
+	if err := SaveThrottle("claude", marker2); err != nil {
+		t.Fatalf("SaveThrottle error: %v", err)
+	}
+	m2, _ := LoadThrottle("claude")
+	if m2 == nil {
+		t.Fatal("expected marker after second save")
+	}
+	if m2.ConsecutiveFailures != 2 {
+		t.Errorf("expected 2 consecutive failures, got %d", m2.ConsecutiveFailures)
+	}
+	// Backoff should have extended RetryAt to ~120s from now
+	if time.Until(m2.RetryAt) < 60*time.Second {
+		t.Errorf("expected extended backoff, RetryAt is only %v away", time.Until(m2.RetryAt))
+	}
+}
+
+func TestSaveThrottle_ClearResetsCount(t *testing.T) {
+	setupTempDir(t)
+
+	marker := fetch.ThrottleMarker{RetryAt: time.Now().Add(100 * time.Millisecond), Reason: "rate limited"}
+	if err := SaveThrottle("claude", marker); err != nil {
+		t.Fatalf("SaveThrottle error: %v", err)
+	}
+	if err := ClearThrottle("claude"); err != nil {
+		t.Fatalf("ClearThrottle error: %v", err)
+	}
+
+	// Wait for the original marker to have expired
+	time.Sleep(150 * time.Millisecond)
+
+	// Next save should start at 1 (clear resets the count)
+	marker2 := fetch.ThrottleMarker{RetryAt: time.Now().Add(100 * time.Millisecond), Reason: "rate limited again"}
+	if err := SaveThrottle("claude", marker2); err != nil {
+		t.Fatalf("SaveThrottle error: %v", err)
+	}
+	m, _ := LoadThrottle("claude")
+	if m == nil {
+		t.Fatal("expected marker after save")
+	}
+	if m.ConsecutiveFailures != 1 {
+		t.Errorf("expected 1 consecutive failure after clear, got %d", m.ConsecutiveFailures)
+	}
+}
+
+func TestThrottleBackoff(t *testing.T) {
+	tests := []struct {
+		failures int
+		minBack  time.Duration
+		maxBack  time.Duration
+	}{
+		{1, 60 * time.Second, 60 * time.Second},
+		{2, 120 * time.Second, 120 * time.Second},
+		{3, 240 * time.Second, 240 * time.Second},
+		{4, 480 * time.Second, 480 * time.Second},
+		{10, 4 * time.Hour, 4 * time.Hour}, // capped
+	}
+	for _, tt := range tests {
+		got := ThrottleBackoff(tt.failures)
+		if got < tt.minBack || got > tt.maxBack {
+			t.Errorf("ThrottleBackoff(%d) = %v, want [%v, %v]", tt.failures, got, tt.minBack, tt.maxBack)
+		}
 	}
 }
 

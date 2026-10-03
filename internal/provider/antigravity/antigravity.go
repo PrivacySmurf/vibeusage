@@ -15,6 +15,7 @@ import (
 	"github.com/joshuadavidthomas/vibeusage/internal/auth/google"
 	"github.com/joshuadavidthomas/vibeusage/internal/auth/oauth"
 	"github.com/joshuadavidthomas/vibeusage/internal/config"
+	"github.com/joshuadavidthomas/vibeusage/internal/executil"
 	"github.com/joshuadavidthomas/vibeusage/internal/fetch"
 	"github.com/joshuadavidthomas/vibeusage/internal/httpclient"
 	"github.com/joshuadavidthomas/vibeusage/internal/models"
@@ -555,14 +556,18 @@ type AGYCLIStrategy struct {
 	Timeout float64
 }
 
+func (s *AGYCLIStrategy) agyPath() string {
+	return executil.ResolveBinary("agy")
+}
+
 func (s *AGYCLIStrategy) IsAvailable() bool {
-	_, err := exec.LookPath("agy")
-	return err == nil
+	return s.agyPath() != ""
 }
 
 func (s *AGYCLIStrategy) Fetch(ctx context.Context) (fetch.FetchResult, error) {
-	if !s.IsAvailable() {
-		return fetch.ResultFail("agy CLI binary not found in PATH"), nil
+	binPath := s.agyPath()
+	if binPath == "" {
+		return fetch.ResultFail("agy CLI binary not found in PATH or standard locations"), nil
 	}
 
 	execCtx := ctx
@@ -572,7 +577,7 @@ func (s *AGYCLIStrategy) Fetch(ctx context.Context) (fetch.FetchResult, error) {
 		defer cancel()
 	}
 
-	cmd := exec.CommandContext(execCtx, "agy", "-p", "/usage", "--output-format", "json")
+	cmd := exec.CommandContext(execCtx, binPath, "-p", "/usage", "--output-format", "json")
 	out, err := cmd.Output()
 	if err != nil {
 		return fetch.ResultFail(fmt.Sprintf("failed to run agy CLI: %v", err)), nil

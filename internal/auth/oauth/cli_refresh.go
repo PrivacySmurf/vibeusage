@@ -5,6 +5,8 @@ import (
 	"io"
 	"os/exec"
 	"time"
+
+	"github.com/joshuadavidthomas/vibeusage/internal/executil"
 )
 
 // CLIRefreshConfig holds the parameters for a CLI-based token refresh.
@@ -43,8 +45,8 @@ func RefreshViaCLI(ctx context.Context, cfg CLIRefreshConfig) *Credentials {
 		return !c.NeedsRefresh()
 	}
 
-	binPath, err := exec.LookPath(cfg.BinaryName)
-	if err != nil {
+	binPath := executil.ResolveBinary(cfg.BinaryName)
+	if binPath == "" {
 		return nil
 	}
 

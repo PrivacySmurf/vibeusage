@@ -29,8 +29,9 @@ type Recorder interface {
 // making requests until RetryAt. Populated from a 429 response's Retry-After
 // header (or a sensible default when the header is missing).
 type ThrottleMarker struct {
-	RetryAt time.Time `json:"retry_at"`
-	Reason  string    `json:"reason,omitempty"`
+	RetryAt            time.Time `json:"retry_at"`
+	Reason             string    `json:"reason,omitempty"`
+	ConsecutiveFailures int       `json:"consecutive_failures,omitempty"`
 }
 
 // ThrottleStore abstracts per-provider rate-limit cooldown persistence.
@@ -111,6 +112,16 @@ type FetchOutcome struct {
 type Strategy interface {
 	IsAvailable() bool
 	Fetch(ctx context.Context) (FetchResult, error)
+}
+
+// HealthProber is optionally implemented by strategies that can probe
+// whether the provider's rate limit has cleared without making a full
+// usage request. The pipeline calls ProbeHealth when a provider has
+// been in exponential backoff for several consecutive failures.
+// Return true if the rate limit appears clear (pipeline will retry),
+// false if still limited (pipeline continues backing off).
+type HealthProber interface {
+	ProbeHealth(ctx context.Context) bool
 }
 
 // TimeoutExtender is optionally implemented by strategies whose Fetch may

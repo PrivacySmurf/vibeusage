@@ -4,14 +4,17 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
+	"os/exec"
 	"os/user"
 	"path/filepath"
 	"time"
 
 	"github.com/joshuadavidthomas/vibeusage/internal/auth/oauth"
 	"github.com/joshuadavidthomas/vibeusage/internal/config"
+	"github.com/joshuadavidthomas/vibeusage/internal/executil"
 	"github.com/joshuadavidthomas/vibeusage/internal/fetch"
 	"github.com/joshuadavidthomas/vibeusage/internal/httpclient"
 	"github.com/joshuadavidthomas/vibeusage/internal/keychain"
@@ -117,6 +120,40 @@ func (s *OAuthStrategy) refreshViaCLI(ctx context.Context) *oauth.Credentials {
 			return s.loadCredentials()
 		},
 	})
+}
+
+// ProbeHealth tests whether the Claude API rate limit has cleared by running
+// a minimal CLI command. Returns true if the API is accessible, false if
+// still rate-limited. Implements fetch.HealthProber.
+func (s *OAuthStrategy) ProbeHealth(ctx context.Context) bool {
+	binPath := executil.ResolveBinary("claude")
+	if binPath == "" {
+		return false
+	}
+
+	probeCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(probeCtx, binPath,
+		"-p", "ok",
+		"--model", "haiku",
+		"--output-format", "json",
+		"--no-session-persistence",
+		"--permission-mode", "plan",
+		"--allowed-tools", "",
+		"--max-budget-usd", "0.001",
+	)
+	cmd.Stdin = nil
+	cmd.Stdout = io.Discard
+	cmd.Stderr = io.Discard
+
+	err := cmd.Run()
+	if err != nil {
+		// Exit code 1 with a rate limit error means still limited.
+		// Any other error (timeout, missing binary) also means can't confirm.
+		return false
+	}
+	return true
 }
 
 func (s *OAuthStrategy) fetchWithCredentials(ctx context.Context, client *httpclient.Client, creds *oauth.Credentials) (fetch.FetchResult, bool, error) {

@@ -148,6 +148,24 @@ func ThrottlePath(providerID string) string {
 
 func SaveThrottle(providerID string, marker fetch.ThrottleMarker) error {
 	path := ThrottlePath(providerID)
+
+	// Exponential backoff: if there's an existing marker (even expired),
+	// increment the consecutive failures count and extend the backoff.
+	existing := readRawThrottle(path)
+	if existing != nil {
+		marker.ConsecutiveFailures = existing.ConsecutiveFailures + 1
+	} else {
+		marker.ConsecutiveFailures = max(marker.ConsecutiveFailures, 1)
+	}
+
+	if marker.ConsecutiveFailures > 1 {
+		backoff := ThrottleBackoff(marker.ConsecutiveFailures)
+		backoffUntil := time.Now().Add(backoff)
+		if backoffUntil.After(marker.RetryAt) {
+			marker.RetryAt = backoffUntil
+		}
+	}
+
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return fmt.Errorf("saving throttle for %s: %w", providerID, err)
 	}
@@ -161,9 +179,41 @@ func SaveThrottle(providerID string, marker fetch.ThrottleMarker) error {
 	return nil
 }
 
+// ThrottleBackoff calculates exponential backoff from consecutive failure count.
+// Starts at 60s, doubles each failure, caps at 4 hours.
+func ThrottleBackoff(failures int) time.Duration {
+	const (
+		base = 60 * time.Second
+		cap  = 4 * time.Hour
+	)
+	backoff := base
+	for i := 1; i < failures && backoff < cap; i++ {
+		backoff *= 2
+	}
+	if backoff > cap {
+		backoff = cap
+	}
+	return backoff
+}
+
+// readRawThrottle reads the throttle file without deleting it, even if expired.
+// Returns nil if the file doesn't exist or is unparseable.
+func readRawThrottle(path string) *fetch.ThrottleMarker {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil
+	}
+	var m fetch.ThrottleMarker
+	if err := json.Unmarshal(data, &m); err != nil {
+		return nil
+	}
+	return &m
+}
+
 // LoadThrottle returns the persisted throttle marker for the provider,
-// or nil if none exists or it has expired. Expired markers are deleted
-// lazily so the on-disk state stays tidy.
+// or nil if none exists or it has expired. Unlike earlier versions, expired
+// markers are NOT deleted here — SaveThrottle reads them to calculate
+// exponential backoff. They are cleaned up on success via ClearThrottle.
 func LoadThrottle(providerID string) (*fetch.ThrottleMarker, error) {
 	path := ThrottlePath(providerID)
 	data, err := os.ReadFile(path)
@@ -178,9 +228,6 @@ func LoadThrottle(providerID string) (*fetch.ThrottleMarker, error) {
 		return nil, fmt.Errorf("parsing throttle for %s: %w", providerID, err)
 	}
 	if time.Now().After(m.RetryAt) {
-		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-			return nil, fmt.Errorf("deleting expired throttle for %s: %w", providerID, err)
-		}
 		return nil, nil
 	}
 	return &m, nil
