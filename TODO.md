@@ -4,7 +4,6 @@
 
 ## Up Next
 - [ ] Confirm Model Studio automatic sign-in renews the session unattended at the next natural expiry (after clearing the slider captcha with one manual login on 9444)
-- [ ] Install Gemini CLI to enable standalone Gemini token refresh (currently covered by Antigravity's Gemini model group)
 
 ## Completed
 - [x] Full provider automation: binary path resolution, MiMo CDP auto-login, Claude exponential backoff with CLI health probe (2026-10-03)
