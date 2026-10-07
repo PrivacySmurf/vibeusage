@@ -27,7 +27,7 @@ import (
 // complete, then re-imports cookies.
 
 const (
-	mimoPlatformURL      = "https://platform.xiaomimimo.com/console/balance"
+	mimoPlatformURL      = "https://platform.xiaomimimo.com/#/console/balance"
 	mimoSSOWaitTimeout   = 15 * time.Second
 	mimoSSOPollInterval  = 500 * time.Millisecond
 	mimoSessionCooldown  = 5 * time.Minute

@@ -99,11 +99,16 @@ func cookieDomainMatches(cookieDomain, requestHost string) bool {
 	if domain == "" || host == "" {
 		return false
 	}
-	if !strings.HasPrefix(domain, ".") {
-		return domain == host
-	}
 	domain = strings.TrimPrefix(domain, ".")
-	return host == domain || strings.HasSuffix(host, "."+domain)
+	if host == domain || strings.HasSuffix(host, "."+domain) {
+		return true
+	}
+	// Xiaomi authentication cookies are set across .xiaomimimo.com and .xiaomi.com
+	if (strings.HasSuffix(host, "xiaomimimo.com") || host == "xiaomimimo.com") &&
+		(domain == "xiaomi.com" || strings.HasSuffix(domain, "xiaomi.com")) {
+		return true
+	}
+	return false
 }
 
 func cookiePathMatches(cookiePath, requestPath string) bool {

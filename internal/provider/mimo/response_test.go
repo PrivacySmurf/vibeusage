@@ -100,7 +100,7 @@ func TestParseSnapshot_Full(t *testing.T) {
 	p := snapshot.Periods[0]
 	assert.Equal(t, "Token Plan (ENTERPRISE)", p.Name)
 	assert.Equal(t, models.PeriodMonthly, p.PeriodType)
-	assert.Equal(t, 75, p.Utilization)
+	assert.Equal(t, 76, p.Utilization)
 	require.NotNil(t, p.Used)
 	assert.Equal(t, 75500000, *p.Used)
 	require.NotNil(t, p.Limit)

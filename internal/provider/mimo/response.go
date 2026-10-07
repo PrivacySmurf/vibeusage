@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
 	"time"
@@ -183,16 +184,35 @@ func parseSnapshot(balanceBytes, detailBytes, usageBytes []byte, now time.Time) 
 		monthUsage := usageData.MonthUsage
 		used := 0
 		limit := 0
-		utilization := int(monthUsage.Percent)
+		utilization := 0
+
+		if monthUsage.Percent > 0 {
+			if monthUsage.Percent <= 1.0 {
+				utilization = int(math.Round(monthUsage.Percent * 100))
+			} else {
+				utilization = int(math.Round(monthUsage.Percent))
+			}
+		}
 
 		if len(monthUsage.Items) > 0 {
 			first := monthUsage.Items[0]
 			used = first.Used
 			limit = first.Limit
 			if first.Percent > 0 {
-				utilization = int(first.Percent)
+				if first.Percent <= 1.0 {
+					utilization = int(math.Round(first.Percent * 100))
+				} else {
+					utilization = int(math.Round(first.Percent))
+				}
 			} else if limit > 0 {
-				utilization = int(float64(used) / float64(limit) * 100)
+				utilization = int(math.Round(float64(used) / float64(limit) * 100))
+			}
+		}
+
+		if used > 0 && limit > 0 && utilization == 0 {
+			utilization = int(math.Round(float64(used) / float64(limit) * 100))
+			if utilization == 0 {
+				utilization = 1
 			}
 		}
 
