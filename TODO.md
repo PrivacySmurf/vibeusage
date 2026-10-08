@@ -3,10 +3,10 @@
 ## In Progress
 
 ## Up Next
-- [ ] Model Studio: apply the same page-target cookie fallback (Chrome 154+ headed profiles reject browser-level `Storage.getCookies`) so its CDP import from :9444 works again
-- [ ] Confirm Model Studio automatic sign-in renews the session unattended at the next natural expiry (after clearing the slider captcha with one manual login on 9444)
+- [ ] Confirm Model Studio automatic sign-in renews the session unattended at the next natural expiry (2026-10-08: unattended renewal verified manually — no slider captcha appeared, so the "one manual login" precondition may be moot)
 
 ## Completed
+- [x] Model Studio: page-target cookie fallback for CDP import (Chrome 154+ rejects browser-level `Storage.getCookies`) + capture the SSO session while the sign-in tab is open — its cookies are scoped to the tab and vanish when it closes (2026-10-08)
 - [x] Full provider automation: binary path resolution, MiMo CDP auto-login, Claude exponential backoff with CLI health probe (2026-10-03)
 - [x] Add executil.ResolveBinary for fallback CLI discovery (~/.local/bin, /opt/homebrew/bin) — fixes Antigravity, Claude, Codex, Gemini (2026-10-03)
 - [x] MiMo CDP auto-login via Xiaomi SSO — navigates to platform, imports cookies from active tab, no form-filling needed (2026-10-03)

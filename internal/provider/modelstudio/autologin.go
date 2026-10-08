@@ -56,12 +56,14 @@ const (
 var (
 	loginFormSettle   = 750 * time.Millisecond
 	loginRedirectWait = 15 * time.Second
+	loginCookieWait   = 15 * time.Second
 )
 
 var (
-	errAutoLoginUnavailable = errors.New("automatic sign-in not configured")
-	errAutoLoginCoolingDown = errors.New("automatic sign-in attempted recently")
-	errLoginNoRedirect      = errors.New("no redirect to the console after submitting")
+	errAutoLoginUnavailable  = errors.New("automatic sign-in not configured")
+	errAutoLoginCoolingDown  = errors.New("automatic sign-in attempted recently")
+	errLoginNoRedirect       = errors.New("no redirect to the console after submitting")
+	errLoginNoSessionCookies = errors.New("console session cookies did not appear after sign-in")
 )
 
 type loginCredentials struct {
@@ -214,7 +216,7 @@ func firstNonEmpty(values map[string]string, keys ...string) string {
 // headed browser on port, fills the passport form, submits, waits for the
 // console redirect, and closes the tab. The browser's cookie jar keeps the
 // session, so a normal CDP import afterwards picks it up.
-func performModelStudioAutoLogin(ctx context.Context, port string, creds loginCredentials) error {
+func performModelStudioAutoLogin(ctx context.Context, port string, creds loginCredentials) (browserSession, error) {
 	ctx, cancel := context.WithTimeout(ctx, loginOverallDeadline)
 	defer cancel()
 	logger := logging.FromContext(ctx).With("provider", "modelstudio", "step", "auto-login")
@@ -224,19 +226,19 @@ func performModelStudioAutoLogin(ctx context.Context, port string, creds loginCr
 	loginURL := alibabaLoginURL + "?oauth_callback=" + url.QueryEscape(modelStudioDashboardURL)
 	target, err := openCDPTarget(ctx, port, loginURL)
 	if err != nil {
-		return fmt.Errorf("open sign-in tab on CDP :%s: %w", port, err)
+		return browserSession{}, fmt.Errorf("open sign-in tab on CDP :%s: %w", port, err)
 	}
 	defer closeCDPTarget(port, target.ID)
 	logger.Debug("opened sign-in tab", "port", port, "elapsed", elapsed())
 
 	page, err := dialCDP(ctx, port, target.wsPath())
 	if err != nil {
-		return fmt.Errorf("attach to sign-in tab: %w", err)
+		return browserSession{}, fmt.Errorf("attach to sign-in tab: %w", err)
 	}
 	defer page.Close()
 
 	if err := page.call("Page.enable", nil, nil); err != nil {
-		return err
+		return browserSession{}, err
 	}
 
 	// The passport form is (re)initialised by its own scripts shortly after
@@ -247,7 +249,7 @@ func performModelStudioAutoLogin(ctx context.Context, port string, creds loginCr
 	for attempt := 1; attempt <= loginMaxAttempts; attempt++ {
 		formCtx, err := page.waitForFrameWorld(ctx, passportFrameHost, loginUsernameSel, loginFormWait)
 		if err != nil {
-			return fmt.Errorf("sign-in form did not appear: %w", err)
+			return browserSession{}, fmt.Errorf("sign-in form did not appear: %w", err)
 		}
 		if attempt == 1 {
 			logger.Debug("sign-in form ready", "elapsed", elapsed())
@@ -264,8 +266,16 @@ func performModelStudioAutoLogin(ctx context.Context, port string, creds loginCr
 
 		err = page.waitForLoginOutcome(ctx, loginRedirectWait)
 		if err == nil {
+			// The redirect to the console only starts the SSO ticket
+			// handshake that mints the session cookies, and those cookies
+			// are scoped to this tab's context and disappear once it
+			// closes — so capture the Cookie header before returning.
+			session, captureErr := page.captureSession(ctx, loginCookieWait)
+			if captureErr != nil {
+				return browserSession{}, captureErr
+			}
 			logger.Debug("signed in", "elapsed", elapsed())
-			return nil
+			return session, nil
 		}
 		lastErr = err
 		if !errors.Is(err, errLoginNoRedirect) {
@@ -278,9 +288,9 @@ func performModelStudioAutoLogin(ctx context.Context, port string, creds loginCr
 	logger.Debug("sign-in did not complete", "elapsed", elapsed(), "err", lastErr,
 		"url", diag.URL, "frames", diag.Frames, "form_text", diag.FormText, "screenshot", diag.Screenshot)
 	if diag.FormText != "" {
-		return fmt.Errorf("%w (sign-in page showed: %s)", lastErr, diag.FormText)
+		return browserSession{}, fmt.Errorf("%w (sign-in page showed: %s)", lastErr, diag.FormText)
 	}
-	return lastErr
+	return browserSession{}, lastErr
 }
 
 // fillAndSubmit types both credentials, confirms the form still holds them,
@@ -512,6 +522,40 @@ func (c *cdpConn) waitForLoginOutcome(ctx context.Context, timeout time.Duration
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
+		case <-time.After(loginPollInterval):
+		}
+	}
+}
+
+// captureSession polls the browser jar until the console's authentication
+// cookies have landed, then builds the Cookie header while the sign-in tab is
+// still open. The SSO ticket cookies are scoped to this tab's browsing
+// context and disappear once it closes, so they cannot be re-imported later.
+func (c *cdpConn) captureSession(ctx context.Context, timeout time.Duration) (browserSession, error) {
+	deadline := time.Now().Add(timeout)
+	lastErr := error(errLoginNoSessionCookies)
+	for {
+		var res struct {
+			Cookies []cdpCookie `json:"cookies"`
+		}
+		if callErr := c.call("Storage.getCookies", nil, &res); callErr != nil {
+			lastErr = callErr
+		} else if header, buildErr := buildModelStudioCookieHeader(
+			toBrowserCookies(res.Cookies),
+			modelStudioConsoleBaseURL+"/data/api.json",
+			time.Now(),
+		); buildErr != nil {
+			lastErr = buildErr
+		} else {
+			return browserSession{Cookie: header, SourceLabel: "CDP auto-login"}, nil
+		}
+
+		if time.Now().After(deadline) {
+			return browserSession{}, fmt.Errorf("%w within %s (last: %v)", errLoginNoSessionCookies, timeout, lastErr)
+		}
+		select {
+		case <-ctx.Done():
+			return browserSession{}, ctx.Err()
 		case <-time.After(loginPollInterval):
 		}
 	}

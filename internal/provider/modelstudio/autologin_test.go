@@ -119,18 +119,16 @@ func TestWebConsoleFetchAutoLogsInWhenNoBrowserSession(t *testing.T) {
 
 	var imports atomic.Int32
 	stubImporter(t, func(context.Context) (browserSession, error) {
-		if imports.Add(1) == 1 {
-			return browserSession{}, fmt.Errorf("%w: no signed-in Alibaba Cloud session in Chrome (CDP :9444)", errBrowserCookieImportUnavailable)
-		}
-		return browserSession{Cookie: "login_aliyunid_ticket=fresh; login_current_pk=account", SourceLabel: "Chrome (CDP :9444)"}, nil
+		imports.Add(1)
+		return browserSession{}, fmt.Errorf("%w: no signed-in Alibaba Cloud session in Chrome (CDP :9444)", errBrowserCookieImportUnavailable)
 	})
 	var logins atomic.Int32
-	stubAutoLogin(t, func(_ context.Context, port string, creds loginCredentials) error {
+	stubAutoLogin(t, func(_ context.Context, port string, creds loginCredentials) (browserSession, error) {
 		logins.Add(1)
 		if port != "9444" || creds.Username != "me@example.com" || creds.Password != "s3cret" {
 			t.Errorf("autologin called with port=%q creds=%+v", port, creds)
 		}
-		return nil
+		return browserSession{Cookie: "login_aliyunid_ticket=fresh; login_current_pk=account", SourceLabel: "CDP auto-login"}, nil
 	})
 
 	result, err := newTestStrategy(server.URL).Fetch(context.Background())
@@ -140,18 +138,17 @@ func TestWebConsoleFetchAutoLogsInWhenNoBrowserSession(t *testing.T) {
 	if !result.Success {
 		t.Fatalf("expected success, got %+v", result)
 	}
-	if logins.Load() != 1 || imports.Load() != 2 {
-		t.Errorf("logins=%d imports=%d, want 1 and 2", logins.Load(), imports.Load())
+	if logins.Load() != 1 || imports.Load() != 1 {
+		t.Errorf("logins=%d imports=%d, want 1 and 1 (the renewed session replaces the re-import)", logins.Load(), imports.Load())
 	}
 	data, _ := config.ReadCredential("modelstudio", "session")
-	if !strings.Contains(string(data), "Chrome (CDP :9444)") {
+	if !strings.Contains(string(data), "CDP auto-login") {
 		t.Errorf("session not persisted after auto-login: %s", data)
 	}
 }
 
 func TestWebConsoleFetchAutoLogsInWhenBrowserSessionExpired(t *testing.T) {
 	testenv.ApplyVibeusage(t.Setenv, t.TempDir())
-	var loggedIn atomic.Bool
 	server := newModelStudioSessionServer(t, func(cookie string) string {
 		if strings.Contains(cookie, "login_aliyunid_ticket=fresh") {
 			return successfulSummaryPayload()
@@ -161,17 +158,12 @@ func TestWebConsoleFetchAutoLogsInWhenBrowserSessionExpired(t *testing.T) {
 	useAutoLoginConfig(t)
 
 	stubImporter(t, func(context.Context) (browserSession, error) {
-		ticket := "stale"
-		if loggedIn.Load() {
-			ticket = "fresh"
-		}
-		return browserSession{Cookie: "login_aliyunid_ticket=" + ticket + "; login_current_pk=account", SourceLabel: "Chrome (CDP :9444)"}, nil
+		return browserSession{Cookie: "login_aliyunid_ticket=stale; login_current_pk=account", SourceLabel: "Chrome (CDP :9444)"}, nil
 	})
 	var logins atomic.Int32
-	stubAutoLogin(t, func(context.Context, string, loginCredentials) error {
+	stubAutoLogin(t, func(context.Context, string, loginCredentials) (browserSession, error) {
 		logins.Add(1)
-		loggedIn.Store(true)
-		return nil
+		return browserSession{Cookie: "login_aliyunid_ticket=fresh; login_current_pk=account", SourceLabel: "CDP auto-login"}, nil
 	})
 
 	result, err := newTestStrategy(server.URL).Fetch(context.Background())
@@ -195,9 +187,9 @@ func TestWebConsoleFetchReportsAutoLoginFailureOnce(t *testing.T) {
 		return browserSession{Cookie: "login_aliyunid_ticket=stale; login_current_pk=account", SourceLabel: "Chrome (CDP :9444)"}, nil
 	})
 	var logins atomic.Int32
-	stubAutoLogin(t, func(context.Context, string, loginCredentials) error {
+	stubAutoLogin(t, func(context.Context, string, loginCredentials) (browserSession, error) {
 		logins.Add(1)
-		return errors.New("sign-in blocked by a slider captcha; sign in manually once in this browser")
+		return browserSession{}, errors.New("sign-in blocked by a slider captcha; sign in manually once in this browser")
 	})
 
 	result, err := newTestStrategy(server.URL).Fetch(context.Background())
@@ -225,9 +217,9 @@ func TestWebConsoleFetchSkipsAutoLoginWhenUnconfigured(t *testing.T) {
 	stubImporter(t, func(context.Context) (browserSession, error) {
 		return browserSession{}, fmt.Errorf("%w: no signed-in Alibaba Cloud session in Chrome (CDP :9444)", errBrowserCookieImportUnavailable)
 	})
-	stubAutoLogin(t, func(context.Context, string, loginCredentials) error {
+	stubAutoLogin(t, func(context.Context, string, loginCredentials) (browserSession, error) {
 		t.Error("autologin must not run without login_command")
-		return nil
+		return browserSession{}, nil
 	})
 
 	result, _ := newTestStrategy(server.URL).Fetch(context.Background())
@@ -242,9 +234,12 @@ func TestWebConsoleFetchSkipsAutoLoginWhenUnconfigured(t *testing.T) {
 func TestPerformModelStudioAutoLoginAgainstFakeChrome(t *testing.T) {
 	chrome := newFakeLoginChrome(t)
 
-	err := performModelStudioAutoLogin(context.Background(), chrome.port, loginCredentials{Username: "me@example.com", Password: "s3cret"})
+	session, err := performModelStudioAutoLogin(context.Background(), chrome.port, loginCredentials{Username: "me@example.com", Password: "s3cret"})
 	if err != nil {
 		t.Fatalf("performModelStudioAutoLogin: %v", err)
+	}
+	if !strings.Contains(session.Cookie, "login_aliyunid_ticket=") || session.SourceLabel != "CDP auto-login" {
+		t.Errorf("session not captured from the sign-in tab: %+v", session)
 	}
 
 	chrome.mu.Lock()
@@ -267,7 +262,7 @@ func TestPerformModelStudioAutoLoginRetriesWhenFormIsWiped(t *testing.T) {
 	chrome := newFakeLoginChrome(t)
 	chrome.wipeFirstSubmit = true
 
-	err := performModelStudioAutoLogin(context.Background(), chrome.port, loginCredentials{Username: "me@example.com", Password: "s3cret"})
+	_, err := performModelStudioAutoLogin(context.Background(), chrome.port, loginCredentials{Username: "me@example.com", Password: "s3cret"})
 	if err != nil {
 		t.Fatalf("performModelStudioAutoLogin: %v", err)
 	}
@@ -285,7 +280,7 @@ func TestPerformModelStudioAutoLoginDetectsCaptcha(t *testing.T) {
 	chrome := newFakeLoginChrome(t)
 	chrome.captcha = true
 
-	err := performModelStudioAutoLogin(context.Background(), chrome.port, loginCredentials{Username: "me@example.com", Password: "s3cret"})
+	_, err := performModelStudioAutoLogin(context.Background(), chrome.port, loginCredentials{Username: "me@example.com", Password: "s3cret"})
 	if err == nil || !strings.Contains(err.Error(), "slider captcha") {
 		t.Fatalf("expected captcha error, got %v", err)
 	}
@@ -317,7 +312,7 @@ func stubImporter(t *testing.T, fn func(context.Context) (browserSession, error)
 	importModelStudioBrowserSession = fn
 }
 
-func stubAutoLogin(t *testing.T, fn func(context.Context, string, loginCredentials) error) {
+func stubAutoLogin(t *testing.T, fn func(context.Context, string, loginCredentials) (browserSession, error)) {
 	t.Helper()
 	old := autoLoginModelStudio
 	t.Cleanup(func() { autoLoginModelStudio = old })
@@ -353,9 +348,9 @@ type fakeLoginChrome struct {
 
 func newFakeLoginChrome(t *testing.T) *fakeLoginChrome {
 	t.Helper()
-	oldSettle, oldRedirect := loginFormSettle, loginRedirectWait
-	loginFormSettle, loginRedirectWait = 10*time.Millisecond, 300*time.Millisecond
-	t.Cleanup(func() { loginFormSettle, loginRedirectWait = oldSettle, oldRedirect })
+	oldSettle, oldRedirect, oldCookieWait := loginFormSettle, loginRedirectWait, loginCookieWait
+	loginFormSettle, loginRedirectWait, loginCookieWait = 10*time.Millisecond, 300*time.Millisecond, 300*time.Millisecond
+	t.Cleanup(func() { loginFormSettle, loginRedirectWait, loginCookieWait = oldSettle, oldRedirect, oldCookieWait })
 	f := &fakeLoginChrome{values: map[string]string{}}
 	const wsPath = "/devtools/page/fake-login-tab"
 
@@ -426,6 +421,17 @@ func (f *fakeLoginChrome) handle(method string, raw json.RawMessage) any {
 	switch method {
 	case "Page.enable":
 		return map[string]any{}
+	case "Storage.getCookies":
+		// The session cookies land only after the sign-in succeeds.
+		cookies := []any{}
+		if f.submitted && !f.captcha {
+			for _, c := range signedInCDPCookies() {
+				cookies = append(cookies, map[string]any{
+					"name": c.Name, "value": c.Value, "domain": c.Domain, "path": c.Path, "secure": c.Secure, "expires": c.Expires,
+				})
+			}
+		}
+		return map[string]any{"cookies": cookies}
 	case "Page.getFrameTree":
 		passport := map[string]any{
 			"frame": map[string]string{"id": "passport", "url": "https://" + passportFrameHost + "/mini_login.htm"},
@@ -510,9 +516,9 @@ func TestWebConsoleFetchHonorsLoginCooldown(t *testing.T) {
 		return browserSession{}, fmt.Errorf("%w: no signed-in Alibaba Cloud session in Chrome (CDP :9444)", errBrowserCookieImportUnavailable)
 	})
 	var logins atomic.Int32
-	stubAutoLogin(t, func(context.Context, string, loginCredentials) error {
+	stubAutoLogin(t, func(context.Context, string, loginCredentials) (browserSession, error) {
 		logins.Add(1)
-		return errors.New("no redirect to the console within 45s")
+		return browserSession{}, errors.New("no redirect to the console within 45s")
 	})
 
 	strategy := newTestStrategy(server.URL)

@@ -160,19 +160,24 @@ func (s *WebConsoleStrategy) fetchImportedBrowserSession(
 	client *httpclient.Client,
 	previous sessionCredentials,
 ) (fetch.FetchResult, error) {
+	imported, importErr := importModelStudioBrowserSession(ctx)
 	loginAttempted := false
+
 	for {
-		imported, importErr := importModelStudioBrowserSession(ctx)
 		if importErr != nil {
 			if !loginAttempted {
 				loginAttempted = true
-				if loginErr := s.autoLogin(ctx); loginErr == nil {
-					continue
-				} else if !errors.Is(loginErr, errAutoLoginUnavailable) {
+				session, loginErr := s.autoLogin(ctx)
+				switch {
+				case loginErr == nil:
+					imported, importErr = session, nil
+				case !errors.Is(loginErr, errAutoLoginUnavailable):
 					importErr = fmt.Errorf("%w; automatic sign-in failed: %v", importErr, loginErr)
 				}
 			}
-			return fetch.ResultThrottled(modelStudioSessionHint(previous, importErr), time.Now().Add(modelStudioSessionCooldown)), nil
+			if importErr != nil {
+				return fetch.ResultThrottled(modelStudioSessionHint(previous, importErr), time.Now().Add(modelStudioSessionCooldown)), nil
+			}
 		}
 
 		creds := sessionCredentials{
@@ -181,49 +186,55 @@ func (s *WebConsoleStrategy) fetchImportedBrowserSession(
 			BrowserLabel: imported.SourceLabel,
 		}
 		snapshot, err := s.fetchWithSession(ctx, client, creds)
-		if err != nil {
-			if !errors.Is(err, errModelStudioSession) {
-				return fetch.ResultFail(fmt.Sprintf("Model Studio web console API failed after importing %s cookies: %v", imported.SourceLabel, err)), nil
+		if err == nil {
+			// Cache only a browser-imported session that has completed an
+			// authenticated quota request. The credentials store is
+			// permission-restricted to the user.
+			if data, marshalErr := json.Marshal(creds); marshalErr == nil {
+				_ = config.WriteCredential("modelstudio", "session", data)
 			}
-			// The browser holds a session, but the console no longer accepts it.
-			var loginErr error
-			if !loginAttempted {
-				loginAttempted = true
-				if loginErr = s.autoLogin(ctx); loginErr == nil {
-					continue
-				}
-			}
+			return fetch.ResultOK(*snapshot), nil
+		}
+		if !errors.Is(err, errModelStudioSession) {
+			return fetch.ResultFail(fmt.Sprintf("Model Studio web console API failed after importing %s cookies: %v", imported.SourceLabel, err)), nil
+		}
+
+		// The browser holds a session, but the console no longer accepts it.
+		// Renew once and retry with the renewed session itself: its cookies
+		// live only in the sign-in tab's context, so re-importing them after
+		// the tab closes can miss them.
+		if loginAttempted {
+			return fetch.ResultThrottled(modelStudioSessionHint(creds, nil), time.Now().Add(modelStudioSessionCooldown)), nil
+		}
+		loginAttempted = true
+		session, loginErr := s.autoLogin(ctx)
+		if loginErr != nil {
 			var hintErr error
-			if loginErr != nil && !errors.Is(loginErr, errAutoLoginUnavailable) {
+			if !errors.Is(loginErr, errAutoLoginUnavailable) {
 				hintErr = fmt.Errorf("automatic sign-in failed: %w", loginErr)
 			}
 			return fetch.ResultThrottled(modelStudioSessionHint(creds, hintErr), time.Now().Add(modelStudioSessionCooldown)), nil
 		}
-
-		// Cache only a browser-imported session that has completed an authenticated
-		// quota request. The credentials store is permission-restricted to the user.
-		if data, err := json.Marshal(creds); err == nil {
-			_ = config.WriteCredential("modelstudio", "session", data)
-		}
-		return fetch.ResultOK(*snapshot), nil
+		imported, importErr = session, nil
 	}
 }
 
 // autoLogin renews the browser session through the configured login_command
-// and headed CDP port. It returns errAutoLoginUnavailable when not configured.
-func (s *WebConsoleStrategy) autoLogin(ctx context.Context) error {
+// and headed CDP port and returns the renewed session captured from the
+// sign-in tab. It returns errAutoLoginUnavailable when not configured.
+func (s *WebConsoleStrategy) autoLogin(ctx context.Context) (browserSession, error) {
 	command, port, err := autoLoginSettings()
 	if err != nil {
-		return err
+		return browserSession{}, err
 	}
 	if last := lastLoginAttempt(); !last.IsZero() && time.Since(last) < loginCooldown {
-		return fmt.Errorf("%w (%s ago); next attempt after %s",
+		return browserSession{}, fmt.Errorf("%w (%s ago); next attempt after %s",
 			errAutoLoginCoolingDown, time.Since(last).Round(time.Second), loginCooldown)
 	}
 	recordLoginAttempt(time.Now())
 	creds, err := loadLoginCredentials(ctx, command)
 	if err != nil {
-		return err
+		return browserSession{}, err
 	}
 	return autoLoginModelStudio(ctx, port, creds)
 }

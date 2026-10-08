@@ -313,3 +313,108 @@ func reserveClosedPort(t *testing.T) string {
 	_ = listener.Close()
 	return port
 }
+
+// newFakeCDPServerPageFallback mimics Chrome 154+ headed profiles: the
+// browser-level endpoint rejects Storage.getCookies ("Browser context
+// management is not supported") while a page-level target serves the same
+// cookie jar.
+func newFakeCDPServerPageFallback(t *testing.T, cookies []cdpCookie) (port string) {
+	t.Helper()
+	const browserWSPath = "/devtools/browser/fake-browser-id"
+	const pageWSPath = "/devtools/page/fake-page-id"
+
+	var server *httptest.Server
+	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, portOnly, _ := net.SplitHostPort(server.Listener.Addr().String())
+		switch r.URL.Path {
+		case "/json/version":
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]string{
+				"Browser":              "Chrome/154.0",
+				"User-Agent":           "Chrome/154.0",
+				"webSocketDebuggerUrl": "ws://127.0.0.1:" + portOnly + browserWSPath,
+			})
+		case "/json/list":
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode([]map[string]string{
+				{
+					"id":                   "fake-page-id",
+					"type":                 "page",
+					"webSocketDebuggerUrl": "ws://127.0.0.1:" + portOnly + pageWSPath,
+				},
+			})
+		case browserWSPath:
+			serveFakeCDPWebSocketError(t, w, r, "Browser context management is not supported.")
+		case pageWSPath:
+			serveFakeCDPWebSocket(t, w, r, cookies)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(server.Close)
+
+	_, port, err := net.SplitHostPort(server.Listener.Addr().String())
+	if err != nil {
+		t.Fatalf("SplitHostPort: %v", err)
+	}
+	return port
+}
+
+func serveFakeCDPWebSocketError(t *testing.T, w http.ResponseWriter, r *http.Request, message string) {
+	t.Helper()
+	hijacker, ok := w.(http.Hijacker)
+	if !ok {
+		t.Fatal("ResponseWriter does not support hijacking")
+	}
+	conn, rw, err := hijacker.Hijack()
+	if err != nil {
+		t.Fatalf("Hijack: %v", err)
+	}
+	defer func() { _ = conn.Close() }()
+
+	h := sha1.New()
+	h.Write([]byte(r.Header.Get("Sec-WebSocket-Key") + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"))
+	accept := base64.StdEncoding.EncodeToString(h.Sum(nil))
+	_, _ = fmt.Fprintf(rw, "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: %s\r\n\r\n", accept)
+	_ = rw.Flush()
+
+	frame, err := readFakeWSFrame(rw.Reader)
+	if err != nil {
+		t.Errorf("read client frame: %v", err)
+		return
+	}
+	var command struct {
+		ID int `json:"id"`
+	}
+	_ = json.Unmarshal(frame, &command)
+
+	payload, _ := json.Marshal(map[string]any{
+		"id":    command.ID,
+		"error": map[string]string{"message": message},
+	})
+	_, _ = rw.Write(encodeFakeWSFrame(payload))
+	_ = rw.Flush()
+}
+
+// Chrome 154+ headed profiles reject browser-level Storage.getCookies; the
+// import must still work by reading the same jar through a page target.
+func TestFetchCookiesFromCDPEndpointFallsBackToPageTarget(t *testing.T) {
+	port := newFakeCDPServerPageFallback(t, signedInCDPCookies())
+	endpoint, err := probeCDPPort(context.Background(), port)
+	if err != nil {
+		t.Fatalf("probeCDPPort() error: %v", err)
+	}
+	cookies, err := fetchCookiesFromCDPEndpoint(context.Background(), endpoint.Port, endpoint.Path)
+	if err != nil {
+		t.Fatalf("fetchCookiesFromCDPEndpoint() error: %v", err)
+	}
+	found := false
+	for _, c := range cookies {
+		if c.Name == "login_aliyunid_ticket" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("page-target fallback missed cookies: %+v", cookies)
+	}
+}
