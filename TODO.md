@@ -3,6 +3,7 @@
 ## In Progress
 
 ## Up Next
+- [ ] Model Studio: apply the same page-target cookie fallback (Chrome 154+ headed profiles reject browser-level `Storage.getCookies`) so its CDP import from :9444 works again
 - [ ] Confirm Model Studio automatic sign-in renews the session unattended at the next natural expiry (after clearing the slider captcha with one manual login on 9444)
 
 ## Completed
