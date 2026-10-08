@@ -164,70 +164,61 @@ func (s *WebConsoleStrategy) fetchImportedBrowserSession(
 	client *httpclient.Client,
 	previous sessionCredentials,
 ) (fetch.FetchResult, error) {
-	loginAttempted := false
-	for {
-		imported, importErr := importMimoBrowserSession(ctx)
-		if importErr != nil {
-			if !loginAttempted {
-				loginAttempted = true
-				if cookieHeader, loginErr := autoLoginMimo(ctx); loginErr == nil && cookieHeader != "" {
-					// Auto-login succeeded and returned cookies directly
-					creds := sessionCredentials{
-						Cookie:       cookieHeader,
-						Source:       sessionSourceBrowser,
-						BrowserLabel: "CDP auto-login",
-					}
-					snapshot, err := s.fetchWithSession(ctx, client, creds.Cookie)
-					if err == nil {
-						if data, err := json.Marshal(creds); err == nil {
-							_ = config.WriteCredential("mimo", "session", data)
-						}
-						return fetch.ResultOK(*snapshot), nil
-					}
-					// If the direct cookie import failed, fall through to normal hint
-					importErr = fmt.Errorf("auto-login succeeded but API call failed: %w", err)
-				} else if loginErr != nil && !errors.Is(loginErr, errMimoAutoLoginUnavailable) {
-					importErr = fmt.Errorf("%w; auto-login failed: %v", importErr, loginErr)
+	imported, importErr := importMimoBrowserSession(ctx)
+	if importErr != nil {
+		if cookieHeader, loginErr := autoLoginMimo(ctx); loginErr == nil && cookieHeader != "" {
+			// Auto-login succeeded and returned cookies directly
+			creds := sessionCredentials{
+				Cookie:       cookieHeader,
+				Source:       sessionSourceBrowser,
+				BrowserLabel: "CDP auto-login",
+			}
+			snapshot, err := s.fetchWithSession(ctx, client, creds.Cookie)
+			if err == nil {
+				if data, err := json.Marshal(creds); err == nil {
+					_ = config.WriteCredential("mimo", "session", data)
 				}
+				return fetch.ResultOK(*snapshot), nil
 			}
-			return fetch.ResultFatal(mimoSessionHint(previous, importErr)), nil
+			// If the direct cookie import failed, fall through to normal hint
+			importErr = fmt.Errorf("auto-login succeeded but API call failed: %w", err)
+		} else if loginErr != nil && !errors.Is(loginErr, errMimoAutoLoginUnavailable) {
+			importErr = fmt.Errorf("%w; auto-login failed: %v", importErr, loginErr)
 		}
-
-		creds := sessionCredentials{
-			Cookie:       imported.Cookie,
-			Source:       sessionSourceBrowser,
-			BrowserLabel: imported.SourceLabel,
-		}
-
-		snapshot, err := s.fetchWithSession(ctx, client, creds.Cookie)
-		if err != nil {
-			if !errors.Is(err, errSessionExpired) {
-				return fetch.ResultFail(fmt.Sprintf("Xiaomi MiMo web console API failed after importing %s cookies: %v", imported.SourceLabel, err)), nil
-			}
-			// Session expired — try auto-login to refresh SSO cookies
-			if !loginAttempted {
-				loginAttempted = true
-				if cookieHeader, loginErr := autoLoginMimo(ctx); loginErr == nil && cookieHeader != "" {
-					creds.Cookie = cookieHeader
-					creds.BrowserLabel = "CDP auto-login"
-					if retrySnapshot, retryErr := s.fetchWithSession(ctx, client, cookieHeader); retryErr == nil {
-						if data, err := json.Marshal(creds); err == nil {
-							_ = config.WriteCredential("mimo", "session", data)
-						}
-						return fetch.ResultOK(*retrySnapshot), nil
-					}
-				}
-			}
-			return fetch.ResultFatal(mimoSessionHint(creds, err)), nil
-		}
-
-		// Cache successfully authenticated browser-imported session
-		if data, err := json.Marshal(creds); err == nil {
-			_ = config.WriteCredential("mimo", "session", data)
-		}
-
-		return fetch.ResultOK(*snapshot), nil
+		return fetch.ResultFatal(mimoSessionHint(previous, importErr)), nil
 	}
+
+	creds := sessionCredentials{
+		Cookie:       imported.Cookie,
+		Source:       sessionSourceBrowser,
+		BrowserLabel: imported.SourceLabel,
+	}
+
+	snapshot, err := s.fetchWithSession(ctx, client, creds.Cookie)
+	if err != nil {
+		if !errors.Is(err, errSessionExpired) {
+			return fetch.ResultFail(fmt.Sprintf("Xiaomi MiMo web console API failed after importing %s cookies: %v", imported.SourceLabel, err)), nil
+		}
+		// Session expired — try auto-login to refresh SSO cookies
+		if cookieHeader, loginErr := autoLoginMimo(ctx); loginErr == nil && cookieHeader != "" {
+			creds.Cookie = cookieHeader
+			creds.BrowserLabel = "CDP auto-login"
+			if retrySnapshot, retryErr := s.fetchWithSession(ctx, client, cookieHeader); retryErr == nil {
+				if data, err := json.Marshal(creds); err == nil {
+					_ = config.WriteCredential("mimo", "session", data)
+				}
+				return fetch.ResultOK(*retrySnapshot), nil
+			}
+		}
+		return fetch.ResultFatal(mimoSessionHint(creds, err)), nil
+	}
+
+	// Cache successfully authenticated browser-imported session
+	if data, err := json.Marshal(creds); err == nil {
+		_ = config.WriteCredential("mimo", "session", data)
+	}
+
+	return fetch.ResultOK(*snapshot), nil
 }
 
 // ExtendTimeout gives Fetch room for an SSO navigation on top of the normal
@@ -254,12 +245,15 @@ func mimoSessionHint(creds sessionCredentials, reason error) string {
 		sb.WriteString("Xiaomi MiMo: session expired or no authenticated session found.")
 	}
 
-	if reason != nil && !errors.Is(reason, errBrowserCookieImportUnavailable) {
+	// The bare import-unavailable sentinel adds nothing beyond the hint text;
+	// every other reason (including import details and "; auto-login failed")
+	// is the only clue the user gets, so show it.
+	if reason != nil && reason != errBrowserCookieImportUnavailable {
 		sb.WriteString(" (")
 		sb.WriteString(reason.Error())
 		sb.WriteString(")")
 	}
 
-	sb.WriteString("\nSign in to https://platform.xiaomimimo.com/#/console/balance in your browser (or CDP fleet on port 9444), or update credentials with 'vibeusage auth mimo'.")
+	sb.WriteString("\nSign in to https://platform.xiaomimimo.com/console/balance in your browser (or CDP fleet on port 9444), or update credentials with 'vibeusage auth mimo'.")
 	return sb.String()
 }

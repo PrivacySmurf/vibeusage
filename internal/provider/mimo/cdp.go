@@ -220,22 +220,42 @@ func importMimoCDPSession(ctx context.Context) (browserSession, error) {
 		errBrowserCookieImportUnavailable, strings.Join(checked, ", "))
 }
 
-// fetchCookiesFromCDPEndpoint asks the browser target for every cookie it holds.
+// fetchCookiesFromCDPEndpoint asks the browser target for every cookie it
+// holds. Chrome 154+ headed profiles reject Storage.getCookies on the
+// browser-level endpoint ("Browser context management is not supported"),
+// so on failure we read the same cookie jar through a page target instead.
 func fetchCookiesFromCDPEndpoint(ctx context.Context, port, path string) ([]browserCookie, error) {
 	conn, err := dialCDP(ctx, port, path)
-	if err != nil {
-		return nil, err
+	if err == nil {
+		cookies, callErr := readCookiesFromConn(conn)
+		conn.Close()
+		if callErr == nil {
+			return cookies, nil
+		}
+		err = callErr
 	}
-	defer conn.Close()
+	cookies, fallbackErr := fetchCookiesViaPageTarget(ctx, port)
+	if fallbackErr != nil {
+		return nil, fmt.Errorf("%w (page-target fallback: %v)", err, fallbackErr)
+	}
+	return cookies, nil
+}
 
+// readCookiesFromConn reads the full cookie jar of the target's browser
+// context via Storage.getCookies and converts it to browserCookie values.
+func readCookiesFromConn(conn *cdpConn) ([]browserCookie, error) {
 	var res struct {
 		Cookies []cdpCookie `json:"cookies"`
 	}
 	if err := conn.call("Storage.getCookies", nil, &res); err != nil {
 		return nil, err
 	}
-	out := make([]browserCookie, 0, len(res.Cookies))
-	for _, c := range res.Cookies {
+	return toBrowserCookies(res.Cookies), nil
+}
+
+func toBrowserCookies(in []cdpCookie) []browserCookie {
+	out := make([]browserCookie, 0, len(in))
+	for _, c := range in {
 		var exp time.Time
 		if c.Expires > 0 {
 			exp = time.Unix(int64(c.Expires), 0)
@@ -250,7 +270,78 @@ func fetchCookiesFromCDPEndpoint(ctx context.Context, port, path string) ([]brow
 			LastAccess: time.Now(),
 		})
 	}
-	return out, nil
+	return out
+}
+
+// fetchCookiesViaPageTarget reads the cookie jar through any page target of
+// the browser, creating a temporary about:blank tab when none exists.
+func fetchCookiesViaPageTarget(ctx context.Context, port string) ([]browserCookie, error) {
+	targets, err := listCDPPageTargets(ctx, port)
+	if err != nil {
+		return nil, err
+	}
+	created := false
+	if len(targets) == 0 {
+		target, openErr := openCDPTarget(ctx, port, "about:blank")
+		if openErr != nil {
+			return nil, openErr
+		}
+		targets = []cdpTarget{target}
+		created = true
+	}
+	defer func() {
+		if created {
+			closeCDPTarget(port, targets[0].ID)
+		}
+	}()
+
+	var lastErr error
+	for _, target := range targets {
+		conn, dialErr := dialCDP(ctx, port, target.wsPath())
+		if dialErr != nil {
+			lastErr = dialErr
+			continue
+		}
+		cookies, callErr := readCookiesFromConn(conn)
+		conn.Close()
+		if callErr == nil {
+			return cookies, nil
+		}
+		lastErr = callErr
+	}
+	return nil, lastErr
+}
+
+// listCDPPageTargets returns the browser's page targets from /json/list.
+func listCDPPageTargets(ctx context.Context, port string) ([]cdpTarget, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://127.0.0.1:"+port+"/json/list", nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("/json/list status %d", resp.StatusCode)
+	}
+	var entries []struct {
+		ID                   string `json:"id"`
+		Type                 string `json:"type"`
+		WebSocketDebuggerURL string `json:"webSocketDebuggerUrl"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&entries); err != nil {
+		return nil, err
+	}
+	var targets []cdpTarget
+	for _, entry := range entries {
+		if entry.Type != "page" || entry.ID == "" {
+			continue
+		}
+		targets = append(targets, cdpTarget{ID: entry.ID, WebSocketDebuggerURL: entry.WebSocketDebuggerURL})
+	}
+	return targets, nil
 }
 
 // cdpConn is a minimal WebSocket client for one DevTools target: enough to

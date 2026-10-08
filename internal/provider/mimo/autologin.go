@@ -27,7 +27,11 @@ import (
 // complete, then re-imports cookies.
 
 const (
-	mimoPlatformURL      = "https://platform.xiaomimimo.com/#/console/balance"
+	// Must be the path-route console URL: it triggers the account.xiaomi.com
+	// SSO redirect that sets api-platform cookies. The hash route
+	// (/#/console/balance) redirects to the public /token-plan marketing page
+	// and never runs the SSO handshake.
+	mimoPlatformURL      = "https://platform.xiaomimimo.com/console/balance"
 	mimoSSOWaitTimeout   = 15 * time.Second
 	mimoSSOPollInterval  = 500 * time.Millisecond
 	mimoSessionCooldown  = 5 * time.Minute
