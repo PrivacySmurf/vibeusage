@@ -29,8 +29,8 @@ type Recorder interface {
 // making requests until RetryAt. Populated from a 429 response's Retry-After
 // header (or a sensible default when the header is missing).
 type ThrottleMarker struct {
-	RetryAt            time.Time `json:"retry_at"`
-	Reason             string    `json:"reason,omitempty"`
+	RetryAt             time.Time `json:"retry_at"`
+	Reason              string    `json:"reason,omitempty"`
 	ConsecutiveFailures int       `json:"consecutive_failures,omitempty"`
 }
 
