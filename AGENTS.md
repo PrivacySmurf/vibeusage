@@ -51,3 +51,7 @@ The `just run` Just command runs `go run ./cmd/vibeusage` with these env vars. W
 - `--no-cache` flag disables cache fallback entirely (fails fast on API errors)
 - Error messages: include underlying errors (e.g. JSON parse errors) — don't swallow them
 - Error hints: only suggest `vibeusage auth` when the error is actually about credentials
+
+### Git hygiene
+
+- `git stash` is unsafe around lint probes here: pre-commit auto-fixers (gofmt, end-of-file-fixer) rewrite files mid-run, and a dirty tree makes `git stash pop` fail and lose edits. When parking in-progress work to run `just lint` or diagnose something, snapshot with a commit instead of stashing.
