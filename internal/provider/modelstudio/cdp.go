@@ -52,6 +52,10 @@ type cdpCookie struct {
 	Path    string  `json:"path"`
 	Secure  bool    `json:"secure"`
 	Expires float64 `json:"expires"`
+	// PartitionKey identifies the cookie's storage partition when the
+	// browser reports one (Chrome 119+ auto-partitioned cookies). Kept as raw
+	// JSON because its shape varies across Chrome versions.
+	PartitionKey json.RawMessage `json:"partitionKey,omitempty"`
 }
 
 type cdpVersionInfo struct {

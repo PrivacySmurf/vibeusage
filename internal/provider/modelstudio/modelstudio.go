@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/joshuadavidthomas/vibeusage/internal/config"
 	"github.com/joshuadavidthomas/vibeusage/internal/fetch"
@@ -56,9 +57,10 @@ func (m ModelStudio) AcceptCredential(credential string) error {
 
 	// 1. Browser Cookie format (contains = or sec_token= or login_aliyunid_ticket=)
 	if strings.Contains(credential, "sec_token") || strings.Contains(credential, "login_aliyunid_ticket") || strings.Contains(credential, ";") {
-		data, err := json.Marshal(map[string]string{
-			"cookie": credential,
-			"source": sessionSourceManual,
+		data, err := json.Marshal(sessionCredentials{
+			Cookie:    credential,
+			Source:    sessionSourceManual,
+			UpdatedAt: time.Now(),
 		})
 		if err != nil {
 			return fmt.Errorf("marshal modelstudio cookie credential: %w", err)
@@ -78,9 +80,10 @@ func (m ModelStudio) AcceptCredential(credential string) error {
 		}
 		if err := json.Unmarshal([]byte(credential), &creds); err == nil {
 			if creds.Cookie != "" {
-				data, err := json.Marshal(map[string]string{
-					"cookie": creds.Cookie,
-					"source": sessionSourceManual,
+				data, err := json.Marshal(sessionCredentials{
+					Cookie:    creds.Cookie,
+					Source:    sessionSourceManual,
+					UpdatedAt: time.Now(),
 				})
 				if err != nil {
 					return fmt.Errorf("marshal modelstudio cookie credential: %w", err)
@@ -120,9 +123,10 @@ func (m ModelStudio) AcceptCredential(credential string) error {
 	}
 
 	// Fallback to storing as cookie/session
-	data, err := json.Marshal(map[string]string{
-		"cookie": credential,
-		"source": sessionSourceManual,
+	data, err := json.Marshal(sessionCredentials{
+		Cookie:    credential,
+		Source:    sessionSourceManual,
+		UpdatedAt: time.Now(),
 	})
 	if err != nil {
 		return fmt.Errorf("marshal modelstudio credential: %w", err)

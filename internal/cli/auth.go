@@ -36,6 +36,19 @@ var authCmd = &cobra.Command{
 			return authStatusCommand()
 		}
 
+		diagnoseFlag, _ := cmd.Flags().GetBool("diagnose")
+		if diagnoseFlag {
+			if len(args) == 0 {
+				return errors.New("--diagnose requires a provider argument")
+			}
+			providerID := args[0]
+			p, ok := provider.Get(providerID)
+			if !ok {
+				return fmt.Errorf("unknown provider: %s. Available: %s", providerID, strings.Join(provider.ListIDs(), ", "))
+			}
+			return authDiagnoseProvider(cmd.Context(), providerID, p)
+		}
+
 		if len(args) == 0 {
 			return authSetup(cmd.Context())
 		}
@@ -94,7 +107,65 @@ func init() {
 	authCmd.Flags().Bool("status", false, "Show authentication status")
 	authCmd.Flags().Bool("delete", false, "Remove a provider and its vibeusage-stored credentials")
 	authCmd.Flags().String("token", "", "Set a credential; omit the value to read from standard input")
+	authCmd.Flags().Bool("diagnose", false, "Show read-only credential and session diagnostics for a provider")
 	authCmd.Flags().Lookup("token").NoOptDefVal = tokenFromStdin
+}
+
+// authDiagnoseProvider prints read-only auth diagnostics for one provider.
+// Generic credential-source discovery runs for every provider; providers
+// implementing provider.AuthDiagnoser append their own observations
+// (stored session state, CDP reachability, live cookie jar contents,
+// throttle markers). Nothing is mutated and no secret values are printed.
+func authDiagnoseProvider(ctx context.Context, providerID string, p provider.Provider) error {
+	statusStyles := map[provider.DiagnosticStatus]lipgloss.Style{
+		provider.DiagOK:   lipgloss.NewStyle().Foreground(lipgloss.Color("2")),
+		provider.DiagWarn: lipgloss.NewStyle().Foreground(lipgloss.Color("3")),
+		provider.DiagFail: lipgloss.NewStyle().Foreground(lipgloss.Color("1")),
+		provider.DiagInfo: lipgloss.NewStyle().Foreground(lipgloss.Color("6")),
+	}
+
+	title := providerID
+	if name := provider.DisplayName(providerID); name != providerID {
+		title = fmt.Sprintf("%s (%s)", providerID, name)
+	}
+	outln(title + " auth diagnostics")
+	outln("")
+
+	found, source, path := provider.FindCredential(providerID)
+	if found {
+		detail := source
+		if path != "" {
+			detail += " (" + path + ")"
+		}
+		outln(fmt.Sprintf("  %-22s %s", "Credential detected", detail))
+	} else {
+		outln(fmt.Sprintf("  %-22s %s", "Credential detected", "none found"))
+	}
+
+	sources := p.CredentialSources()
+	for _, cliPath := range sources.CLIPaths {
+		outln(fmt.Sprintf("  %-22s %s", "CLI credential path", cliPath))
+	}
+	for _, envVar := range sources.EnvVars {
+		state := "unset"
+		if strings.TrimSpace(os.Getenv(envVar)) != "" {
+			state = "set"
+		}
+		outln(fmt.Sprintf("  %-22s %s %s", "Environment variable", envVar, state))
+	}
+	outln("")
+
+	diagnoser, ok := p.(provider.AuthDiagnoser)
+	if !ok {
+		outln("  no provider-specific diagnostics available")
+		return nil
+	}
+	for _, d := range diagnoser.DiagnoseAuth(ctx) {
+		status := string(d.Status)
+		rendered := statusStyles[d.Status].Render(status) + strings.Repeat(" ", 4-len(status)+1)
+		outln(fmt.Sprintf("  %-22s %s %s", d.Name, rendered, d.Detail))
+	}
+	return nil
 }
 
 func validateAuthArgs(cmd *cobra.Command, args []string) error {

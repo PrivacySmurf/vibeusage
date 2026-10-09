@@ -37,10 +37,11 @@ type WebConsoleStrategy struct {
 }
 
 type sessionCredentials struct {
-	Cookie       string `json:"cookie"`
-	SecToken     string `json:"sec_token,omitempty"`
-	Source       string `json:"source,omitempty"`
-	BrowserLabel string `json:"browser,omitempty"`
+	Cookie       string    `json:"cookie"`
+	SecToken     string    `json:"sec_token,omitempty"`
+	Source       string    `json:"source,omitempty"`
+	BrowserLabel string    `json:"browser,omitempty"`
+	UpdatedAt    time.Time `json:"updated_at,omitempty"`
 }
 
 const (
@@ -184,6 +185,7 @@ func (s *WebConsoleStrategy) fetchImportedBrowserSession(
 			Cookie:       imported.Cookie,
 			Source:       sessionSourceBrowser,
 			BrowserLabel: imported.SourceLabel,
+			UpdatedAt:    time.Now(),
 		}
 		snapshot, err := s.fetchWithSession(ctx, client, creds)
 		if err == nil {

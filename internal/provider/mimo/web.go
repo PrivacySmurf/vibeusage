@@ -27,9 +27,10 @@ type WebConsoleStrategy struct {
 }
 
 type sessionCredentials struct {
-	Cookie       string `json:"cookie"`
-	Source       string `json:"source,omitempty"`
-	BrowserLabel string `json:"browser,omitempty"`
+	Cookie       string    `json:"cookie"`
+	Source       string    `json:"source,omitempty"`
+	BrowserLabel string    `json:"browser,omitempty"`
+	UpdatedAt    time.Time `json:"updated_at,omitempty"`
 }
 
 const (
@@ -172,6 +173,7 @@ func (s *WebConsoleStrategy) fetchImportedBrowserSession(
 				Cookie:       cookieHeader,
 				Source:       sessionSourceBrowser,
 				BrowserLabel: "CDP auto-login",
+				UpdatedAt:    time.Now(),
 			}
 			snapshot, err := s.fetchWithSession(ctx, client, creds.Cookie)
 			if err == nil {
@@ -192,6 +194,7 @@ func (s *WebConsoleStrategy) fetchImportedBrowserSession(
 		Cookie:       imported.Cookie,
 		Source:       sessionSourceBrowser,
 		BrowserLabel: imported.SourceLabel,
+		UpdatedAt:    time.Now(),
 	}
 
 	snapshot, err := s.fetchWithSession(ctx, client, creds.Cookie)
@@ -203,6 +206,7 @@ func (s *WebConsoleStrategy) fetchImportedBrowserSession(
 		if cookieHeader, loginErr := autoLoginMimo(ctx); loginErr == nil && cookieHeader != "" {
 			creds.Cookie = cookieHeader
 			creds.BrowserLabel = "CDP auto-login"
+			creds.UpdatedAt = time.Now()
 			if retrySnapshot, retryErr := s.fetchWithSession(ctx, client, cookieHeader); retryErr == nil {
 				if data, err := json.Marshal(creds); err == nil {
 					_ = config.WriteCredential("mimo", "session", data)

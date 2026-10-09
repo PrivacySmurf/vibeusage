@@ -281,6 +281,14 @@ Remove credentials for a provider:
 vibeusage auth claude --delete
 ```
 
+Inspect a provider's read-only auth and session state without changing anything:
+
+```bash
+vibeusage auth modelstudio --diagnose
+```
+
+Providers with browser-session renewal (Model Studio, MiMo) report the stored session's source and age, CDP endpoint reachability, the live cookie jar by name and partition key only (never values), browser-profile discoverability, throttle markers, and the auto-login cooldown — the state you need when a session silently stops renewing.
+
 Set credentials noninteractively. Piping keeps the value out of shell history and process arguments:
 
 ```bash
