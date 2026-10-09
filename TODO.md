@@ -3,7 +3,8 @@
 ## In Progress
 
 ## Up Next
-- [ ] Confirm Model Studio automatic sign-in renews the session unattended at the next natural expiry (2026-10-08: unattended renewal verified manually — no slider captcha appeared, so the "one manual login" precondition may be moot)
+- [ ] Confirm Model Studio automatic sign-in renews the session unattended at the next natural expiry (2026-10-08: unverified manually — no slider captcha appeared; `vibeusage auth modelstudio --diagnose` now makes the check a one-liner)
+- [ ] Bump the Go toolchain: `just check` fails at `vuln` with 9 called stdlib findings — pre-existing (confirmed identical on origin/main `e282d10`), environmental drift between the installed Go and the vuln DB, untouched by local changes (2026-10-09)
 
 ## Completed
 - [x] Model Studio: page-target cookie fallback for CDP import (Chrome 154+ rejects browser-level `Storage.getCookies`) + capture the SSO session while the sign-in tab is open — its cookies are scoped to the tab and vanish when it closes (2026-10-08)
