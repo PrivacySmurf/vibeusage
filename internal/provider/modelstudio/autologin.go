@@ -533,7 +533,7 @@ func (c *cdpConn) waitForLoginOutcome(ctx context.Context, timeout time.Duration
 // context and disappear once it closes, so they cannot be re-imported later.
 func (c *cdpConn) captureSession(ctx context.Context, timeout time.Duration) (browserSession, error) {
 	deadline := time.Now().Add(timeout)
-	lastErr := error(errLoginNoSessionCookies)
+	var lastErr error
 	for {
 		var res struct {
 			Cookies []cdpCookie `json:"cookies"`
