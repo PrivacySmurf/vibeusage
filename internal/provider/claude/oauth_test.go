@@ -872,7 +872,7 @@ func TestFetch_RefreshesAfter429WhenTokenNeedsRefresh(t *testing.T) {
 	}
 }
 
-func TestFetch_ExpiredToken429FailsFatalWhenCLIRefreshFails(t *testing.T) {
+func TestFetch_ExpiredToken429UnknownCLIFailureBacksOffWithoutClaimingReauth(t *testing.T) {
 	home := t.TempDir()
 	setUserHome(t, home)
 	testenv.ApplyVibeusage(t.Setenv, t.TempDir())
@@ -896,10 +896,10 @@ func TestFetch_ExpiredToken429FailsFatalWhenCLIRefreshFails(t *testing.T) {
 	if result.Success {
 		t.Fatal("expected failure")
 	}
-	if result.ShouldFallback {
-		t.Error("expected ShouldFallback = false (fatal error)")
+	if !result.ShouldFallback || result.RetryAfter == nil {
+		t.Error("unknown CLI failure should back off and permit cache fallback")
 	}
-	if !strings.Contains(result.Error, "OAuth token expired and could not be refreshed") {
+	if !strings.Contains(result.Error, "cli_failed") || strings.Contains(result.Error, "Sign in") {
 		t.Errorf("unexpected error: %q", result.Error)
 	}
 }
@@ -1036,7 +1036,71 @@ func TestLoadCredentials_PrefersValidKeychainOverExpiredFile(t *testing.T) {
 	}
 }
 
-func TestLoadCredentials_PrefersLaterExpiry(t *testing.T) {
+func TestParseClaudeCredentials_RejectsTokenlessRecords(t *testing.T) {
+	for _, data := range []string{
+		`{"claudeAiOauth":{}}`,
+		`{"claudeAiOauth":{"accessToken":"","refreshToken":"","expiresAt":0}}`,
+		`{"claudeAiOauth":{"refreshToken":"ref","expiresAt":4102444800000}}`,
+		`{"claudeAiOauth":null}`,
+		`{"mcpOAuth":{"plugin":"not-claude"}}`,
+		`{"refresh_token":"ref"}`,
+	} {
+		t.Run(data, func(t *testing.T) {
+			if creds := parseClaudeCredentials([]byte(data)); creds != nil {
+				t.Fatalf("parseClaudeCredentials() = %#v, want nil", creds)
+			}
+		})
+	}
+}
+
+func TestLoadCredentials_EmptyKeychainDoesNotShadowExpiredFile(t *testing.T) {
+	home := t.TempDir()
+	setUserHome(t, home)
+	testenv.ApplyVibeusage(t.Setenv, t.TempDir())
+	writeClaudeAuth(t, home, `{"claudeAiOauth":{"accessToken":"file-token","refreshToken":"file-refresh","expiresAt":1}}`)
+
+	oldRead := readKeychainSecret
+	oldUsername := currentUsername
+	t.Cleanup(func() {
+		readKeychainSecret = oldRead
+		currentUsername = oldUsername
+	})
+	currentUsername = func() (string, error) { return "test-user", nil }
+	readKeychainSecret = func(_ string, account string) (string, error) {
+		if account == "test-user" {
+			return `{"claudeAiOauth":{"accessToken":"","refreshToken":"","expiresAt":0}}`, nil
+		}
+		return `{"mcpOAuth":{"plugin":"not-claude"}}`, nil
+	}
+
+	creds := (&OAuthStrategy{}).loadCredentials()
+	if creds == nil || creds.AccessToken != "file-token" || creds.RefreshToken != "file-refresh" {
+		t.Fatalf("loadCredentials() = %#v, want file credentials despite expired metadata", creds)
+	}
+}
+
+func TestLoadKeychainCredentials_EmptyCurrentUserFallsBackToLegacy(t *testing.T) {
+	oldRead := readKeychainSecret
+	oldUsername := currentUsername
+	t.Cleanup(func() {
+		readKeychainSecret = oldRead
+		currentUsername = oldUsername
+	})
+	currentUsername = func() (string, error) { return "test-user", nil }
+	readKeychainSecret = func(_ string, account string) (string, error) {
+		if account == "test-user" {
+			return `{"claudeAiOauth":{}}`, nil
+		}
+		return `{"claudeAiOauth":{"accessToken":"legacy-token"}}`, nil
+	}
+
+	creds := (&OAuthStrategy{}).loadKeychainCredentials()
+	if creds == nil || creds.AccessToken != "legacy-token" {
+		t.Fatalf("loadKeychainCredentials() = %#v, want legacy credentials", creds)
+	}
+}
+
+func TestLoadCredentials_PrefersScopedKeychainOverLaterFileExpiry(t *testing.T) {
 	home := t.TempDir()
 	setUserHome(t, home)
 	testenv.ApplyVibeusage(t.Setenv, t.TempDir())
@@ -1056,7 +1120,7 @@ func TestLoadCredentials_PrefersLaterExpiry(t *testing.T) {
 	if creds == nil {
 		t.Fatal("loadCredentials() = nil, want newer file creds")
 	}
-	if creds.AccessToken != "file-newer" {
-		t.Errorf("access_token = %q, want file-newer", creds.AccessToken)
+	if creds.AccessToken != "kc-older" {
+		t.Errorf("access_token = %q, want current-user Keychain's kc-older", creds.AccessToken)
 	}
 }

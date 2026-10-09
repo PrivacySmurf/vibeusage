@@ -3,10 +3,13 @@
 ## In Progress
 
 ## Up Next
-- [ ] Confirm Model Studio automatic sign-in renews the session unattended at the next natural expiry (2026-10-08: unverified manually — no slider captcha appeared; `vibeusage auth modelstudio --diagnose` now makes the check a one-liner)
-- [ ] Bump the Go toolchain: `just check` fails at `vuln` with 9 called stdlib findings — pre-existing (confirmed identical on origin/main `e282d10`), environmental drift between the installed Go and the vuln DB, untouched by local changes (2026-10-09)
+- [ ] Confirm Model Studio automatic sign-in renews the session unattended at the next natural expiry (2026-10-09: live, uncached quota fetch succeeds, but stored CDP auto-login session still predates `updated_at`; no renewal observed, so confirmation remains open. `vibeusage auth modelstudio --diagnose` reports :9444 has no page targets and :9222 has no Alibaba session)
+- [ ] Confirm Claude CLI-owned unattended renewal at the next natural expiry, including the background quota runner; successful post-login usage is not renewal proof.
+- [ ] Align DSH Everything OAuth with CLI-owned Claude credentials (handoff supplied 2026-10-09): imported chains must not be directly rotated by DSH; agree on ownership, profile-aware discovery, and a genuinely shared renewal/locking protocol. Independently obtained DSH OAuth chains retain separate ownership.
 
 ## Completed
+- [x] Re-authenticate Claude CLI and confirm live, uncached Claude usage after `claude auth login`; canonical current-user Keychain credentials selected (2026-10-09).
+- [x] Bump the Go toolchain to 1.27.2 in go.mod (CI follows go-version-file); `just check` now passes, including `vuln` with zero called vulnerabilities (2026-10-09)
 - [x] Model Studio: page-target cookie fallback for CDP import (Chrome 154+ rejects browser-level `Storage.getCookies`) + capture the SSO session while the sign-in tab is open — its cookies are scoped to the tab and vanish when it closes (2026-10-08)
 - [x] Full provider automation: binary path resolution, MiMo CDP auto-login, Claude exponential backoff with CLI health probe (2026-10-03)
 - [x] Add executil.ResolveBinary for fallback CLI discovery (~/.local/bin, /opt/homebrew/bin) — fixes Antigravity, Claude, Codex, Gemini (2026-10-03)

@@ -12,6 +12,14 @@ import (
 	"github.com/joshuadavidthomas/vibeusage/internal/testenv"
 )
 
+type diagProviderWithoutDiagnoser struct {
+	provider.Provider
+}
+
+func (diagProviderWithoutDiagnoser) CredentialSources() provider.CredentialInfo {
+	return provider.CredentialInfo{}
+}
+
 type diagFakeProvider struct {
 	provider.Provider
 	diags []provider.Diagnostic
@@ -70,13 +78,10 @@ func TestAuthDiagnoseProviderWithoutDiagnoser(t *testing.T) {
 	testenv.ApplySameDir(t.Setenv, t.TempDir())
 	config.Override(t, config.DefaultConfig())
 
-	p, ok := provider.Get("claude")
-	if !ok {
-		t.Fatal("claude provider not registered")
-	}
+	p := diagProviderWithoutDiagnoser{}
 
 	output := captureDiagnose(t, func() error {
-		return authDiagnoseProvider(context.Background(), "claude", p)
+		return authDiagnoseProvider(context.Background(), "diag-no-diagnoser", p)
 	})
 	if !strings.Contains(output, "auth diagnostics") {
 		t.Errorf("output missing title: %q", output)

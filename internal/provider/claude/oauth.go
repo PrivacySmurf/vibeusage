@@ -4,17 +4,15 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"os"
-	"os/exec"
 	"os/user"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/joshuadavidthomas/vibeusage/internal/auth/oauth"
 	"github.com/joshuadavidthomas/vibeusage/internal/config"
-	"github.com/joshuadavidthomas/vibeusage/internal/executil"
 	"github.com/joshuadavidthomas/vibeusage/internal/fetch"
 	"github.com/joshuadavidthomas/vibeusage/internal/httpclient"
 	"github.com/joshuadavidthomas/vibeusage/internal/keychain"
@@ -64,6 +62,10 @@ func (s *OAuthStrategy) IsAvailable() bool {
 }
 
 func (s *OAuthStrategy) Fetch(ctx context.Context) (fetch.FetchResult, error) {
+	// Leave headroom for the quota runner's 30s execFile deadline. Respect any
+	// shorter caller deadline across API calls, CLI renewal, and the retry.
+	ctx, cancel := context.WithTimeout(ctx, 25*time.Second)
+	defer cancel()
 	creds := s.loadCredentials()
 	if creds == nil {
 		return fetch.ResultFail("No OAuth credentials found"), nil
@@ -93,10 +95,10 @@ func (s *OAuthStrategy) Fetch(ctx context.Context) (fetch.FetchResult, error) {
 		return result, nil
 	}
 
-	refreshed := s.refreshViaCLI(ctx)
+	refreshed, outcome := s.refreshViaCLI(ctx)
 	if refreshed == nil {
 		if unauthorized || creds.IsExpired() {
-			return fetch.ResultFatal("OAuth token expired and could not be refreshed. Re-authenticate with the Claude CLI."), nil
+			return claudeRefreshFailure(outcome), nil
 		}
 		return result, nil
 	}
@@ -104,9 +106,17 @@ func (s *OAuthStrategy) Fetch(ctx context.Context) (fetch.FetchResult, error) {
 	return result, err
 }
 
-func (s *OAuthStrategy) refreshViaCLI(ctx context.Context) *oauth.Credentials {
-	return oauth.RefreshViaCLI(ctx, oauth.CLIRefreshConfig{
-		BinaryName: "claude",
+func (s *OAuthStrategy) refreshViaCLI(ctx context.Context) (*oauth.Credentials, oauth.CLIRefreshOutcome) {
+	dir := claudeRefreshDir()
+	if dir == "" {
+		return nil, oauth.CLIRefreshOutcome{At: time.Now().UTC(), Reason: oauth.CLIRefreshStateError, Hint: oauth.CLIHintUnknown, ExitCode: -1}
+	}
+	if len(claudeAuthOverrides()) > 0 {
+		return nil, oauth.CLIRefreshOutcome{At: time.Now().UTC(), Reason: oauth.CLIRefreshAuthOverride, Hint: oauth.CLIHintUnknown, ExitCode: -1}
+	}
+	creds, outcome := oauth.RefreshViaCLIWithOutcome(ctx, oauth.CLIRefreshConfig{
+		CoordinationDir: dir,
+		BinaryName:      "claude",
 		Args: []string{
 			"-p", "ok",
 			"--model", "haiku",
@@ -120,40 +130,41 @@ func (s *OAuthStrategy) refreshViaCLI(ctx context.Context) *oauth.Credentials {
 			return s.loadCredentials()
 		},
 	})
+	logging.FromContext(ctx).Debug("Claude CLI renewal", "reason", outcome.Reason, "hint", outcome.Hint,
+		"exit_code", outcome.ExitCode, "duration_ms", outcome.DurationMillis, "retry_at", outcome.RetryAt)
+	return creds, outcome
 }
 
-// ProbeHealth tests whether the Claude API rate limit has cleared by running
-// a minimal CLI command. Returns true if the API is accessible, false if
-// still rate-limited. Implements fetch.HealthProber.
+// claudeRefreshDir is shared by every invocation for the same CLI user, even
+// when application data/cache overrides differ. It stores no token material.
+func claudeRefreshDir() string {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return ""
+	}
+	return filepath.Join(home, ".cache", "vibeusage", "claude-refresh")
+}
+
+func claudeRefreshFailure(outcome oauth.CLIRefreshOutcome) fetch.FetchResult {
+	message := fmt.Sprintf("Claude OAuth renewal failed: %s (CLI hint: %s). Run 'vibeusage auth claude --diagnose' for details.", outcome.Reason, outcome.Hint)
+	if outcome.Hint == oauth.CLIHintLoginRequired || outcome.Hint == oauth.CLIHintRefreshRejected {
+		return fetch.ResultFatal(message + " Sign in with 'claude auth login'.")
+	}
+	if outcome.Reason == oauth.CLIRefreshCancelled {
+		return fetch.ResultFail(message)
+	}
+	retryAt := outcome.RetryAt
+	if retryAt.IsZero() {
+		retryAt = time.Now().Add(30 * time.Second)
+	}
+	return fetch.ResultThrottled(message, retryAt)
+}
+
+// ProbeHealth uses the same quota/renewal path, so a probe cannot start an
+// uncoordinated token-rotating Claude subprocess or a separate paid generation.
 func (s *OAuthStrategy) ProbeHealth(ctx context.Context) bool {
-	binPath := executil.ResolveBinary("claude")
-	if binPath == "" {
-		return false
-	}
-
-	probeCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
-	defer cancel()
-
-	cmd := exec.CommandContext(probeCtx, binPath,
-		"-p", "ok",
-		"--model", "haiku",
-		"--output-format", "json",
-		"--no-session-persistence",
-		"--permission-mode", "plan",
-		"--allowed-tools", "",
-		"--max-budget-usd", "0.001",
-	)
-	cmd.Stdin = nil
-	cmd.Stdout = io.Discard
-	cmd.Stderr = io.Discard
-
-	err := cmd.Run()
-	if err != nil {
-		// Exit code 1 with a rate limit error means still limited.
-		// Any other error (timeout, missing binary) also means can't confirm.
-		return false
-	}
-	return true
+	result, err := s.Fetch(ctx)
+	return err == nil && result.Success
 }
 
 func (s *OAuthStrategy) fetchWithCredentials(ctx context.Context, client *httpclient.Client, creds *oauth.Credentials) (fetch.FetchResult, bool, error) {
@@ -262,9 +273,27 @@ func loadCachedIdentity() (*models.ProviderIdentity, error) {
 	return id, nil
 }
 
-func (s *OAuthStrategy) externalPaths() []string {
+func claudeConfigDir() string {
 	home, _ := os.UserHomeDir()
-	return []string{filepath.Join(home, ".claude", ".credentials.json")}
+	if dir := strings.TrimSpace(os.Getenv("CLAUDE_CONFIG_DIR")); dir != "" {
+		if strings.HasPrefix(dir, "~/") {
+			dir = filepath.Join(home, dir[2:])
+		}
+		if absolute, err := filepath.Abs(dir); err == nil {
+			return absolute
+		}
+		return filepath.Clean(dir)
+	}
+	return filepath.Join(home, ".claude")
+}
+
+func usesDefaultClaudeConfig() bool {
+	home, _ := os.UserHomeDir()
+	return claudeConfigDir() == filepath.Join(home, ".claude")
+}
+
+func (s *OAuthStrategy) externalPaths() []string {
+	return []string{filepath.Join(claudeConfigDir(), ".credentials.json")}
 }
 
 func (s *OAuthStrategy) loadCredentials() *oauth.Credentials {
@@ -272,44 +301,12 @@ func (s *OAuthStrategy) loadCredentials() *oauth.Credentials {
 	// by the Claude CLI; vibeusage is a piggy-back consumer and never writes
 	// new tokens. Any stale entry in vibeusage's own credentials store is
 	// cleared lazily so it can't shadow the live source.
-	var candidates []*oauth.Credentials
-
-	for _, path := range s.externalPaths() {
-		data, err := os.ReadFile(path)
-		if err != nil {
-			continue
-		}
-		if creds := parseClaudeCredentials(data); creds != nil {
-			candidates = append(candidates, creds)
-		}
-	}
-
-	if creds := s.loadKeychainCredentials(); creds != nil {
-		candidates = append(candidates, creds)
-	}
-
-	if len(candidates) == 0 {
+	best := selectClaudeCredential(s.readCredentialSources())
+	if best == nil {
 		return nil
 	}
-
 	cleanupOrphanOAuthSlot()
-
-	// Pick the best candidate: prefer non-expired credentials, or the one with the latest expiration.
-	best := candidates[0]
-	for _, c := range candidates[1:] {
-		if best.IsExpired() && !c.IsExpired() {
-			best = c
-			continue
-		}
-		if !best.IsExpired() && c.IsExpired() {
-			continue
-		}
-		if c.ExpiresAt != "" && (best.ExpiresAt == "" || c.ExpiresAt > best.ExpiresAt) {
-			best = c
-		}
-	}
-
-	return best
+	return best.creds
 }
 
 // cleanupOrphanOAuthSlot removes any vibeusage-owned claude/oauth credential.
@@ -327,6 +324,12 @@ func parseClaudeCredentials(data []byte) *oauth.Credentials {
 	// Try Claude CLI format first
 	var cliCreds ClaudeCLICredentials
 	if err := json.Unmarshal(data, &cliCreds); err == nil && cliCreds.ClaudeAiOauth != nil {
+		// Logged-out Keychain records can retain an empty OAuth object with
+		// zero expiry. Reject it rather than treating it as a non-expiring
+		// candidate that shadows usable file or legacy Keychain credentials.
+		if cliCreds.ClaudeAiOauth.AccessToken == "" {
+			return nil
+		}
 		creds := cliCreds.ClaudeAiOauth.ToOAuthCredentials()
 		return &creds
 	}
@@ -343,6 +346,9 @@ func parseClaudeCredentials(data []byte) *oauth.Credentials {
 }
 
 func (s *OAuthStrategy) loadKeychainCredentials() *oauth.Credentials {
+	if !usesDefaultClaudeConfig() {
+		return nil
+	}
 	if username, err := currentUsername(); err == nil && username != "" {
 		if creds := loadClaudeKeychainAccount(username); creds != nil {
 			return creds

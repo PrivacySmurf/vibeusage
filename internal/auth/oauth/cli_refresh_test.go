@@ -322,6 +322,33 @@ func runCLIRefreshHelper(scenario, credPath string) int {
 		}
 		time.Sleep(30 * time.Second)
 		return 0
+	case "login-required":
+		_, _ = fmt.Fprintln(os.Stderr, "SECRET_SENTINEL access_token=SECRET_SENTINEL: Not logged in. Please run /login")
+		return 7
+	case "network-error":
+		_, _ = fmt.Fprintln(os.Stderr, "SECRET_SENTINEL network error ECONNREFUSED")
+		return 8
+	case "rate-limit":
+		_, _ = fmt.Fprintln(os.Stdout, "SECRET_SENTINEL too many requests")
+		return 9
+	case "rejected":
+		_, _ = fmt.Fprintln(os.Stderr, "SECRET_SENTINEL invalid refresh token")
+		return 10
+	case "hold-lock":
+		file, err := os.OpenFile(credPath, os.O_CREATE|os.O_RDWR, 0o600)
+		if err != nil {
+			return 2
+		}
+		defer func() { _ = file.Close() }()
+		if tryRefreshLock(file) != nil {
+			return 3
+		}
+		defer func() { _ = unlockRefreshFile(file) }()
+		if os.WriteFile(credPath+".ready", []byte("ready"), 0o600) != nil {
+			return 4
+		}
+		time.Sleep(30 * time.Second)
+		return 0
 	case "success":
 		return 0
 	case "hang":
