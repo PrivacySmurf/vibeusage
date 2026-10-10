@@ -17,6 +17,7 @@ import (
 	"github.com/joshuadavidthomas/vibeusage/internal/fetch"
 	"github.com/joshuadavidthomas/vibeusage/internal/httpclient"
 	"github.com/joshuadavidthomas/vibeusage/internal/keychain"
+	"github.com/joshuadavidthomas/vibeusage/internal/logging"
 	"github.com/joshuadavidthomas/vibeusage/internal/models"
 	"github.com/joshuadavidthomas/vibeusage/internal/provider"
 )
@@ -114,6 +115,10 @@ func (s *OAuthStrategy) IsAvailable() bool {
 }
 
 func (s *OAuthStrategy) Fetch(ctx context.Context) (fetch.FetchResult, error) {
+	// Leave headroom for the quota runner's 30s execFile deadline. Respect any
+	// shorter caller deadline across API calls, CLI renewal, and the retry.
+	ctx, cancel := context.WithTimeout(ctx, 25*time.Second)
+	defer cancel()
 	creds := s.loadCredentials()
 	if creds == nil {
 		return fetch.ResultFail("No OAuth credentials found"), nil
@@ -131,26 +136,83 @@ func (s *OAuthStrategy) Fetch(ctx context.Context) (fetch.FetchResult, error) {
 		return result, err
 	}
 
-	refreshed := s.refreshViaCLI(ctx)
+	refreshed, outcome := s.refreshViaCLI(ctx)
 	if refreshed == nil {
-		return fetch.ResultFatal("OAuth token expired and could not be refreshed. Re-authenticate with `codex login`."), nil
+		return codexRefreshFailure(outcome), nil
 	}
 	result, _, err = s.fetchUsage(ctx, client, usageURL, refreshed)
 	return result, err
 }
 
-func (s *OAuthStrategy) refreshViaCLI(ctx context.Context) *oauth.Credentials {
-	return oauth.RefreshViaCLI(ctx, oauth.CLIRefreshConfig{
-		BinaryName: "codex",
-		Args: []string{
-			"exec", "say ok",
-			"--skip-git-repo-check",
-			"--sandbox", "read-only",
-		},
-		LoadCredentials: func() *oauth.Credentials {
-			return s.loadCredentials()
-		},
+// codexRenewalArgs start a minimal non-interactive Codex run: the CLI renews
+// its own OAuth chain at startup and vibeusage stops it as soon as a fresh
+// token is on disk. User config (MCP servers, plugins, the hooks feature),
+// execpolicy rules, and session persistence are all skipped. DSH Everything
+// OAuth launches the same command under the same coordination directory.
+var codexRenewalArgs = []string{
+	"exec", "--ephemeral", "--ignore-user-config", "--ignore-rules",
+	"--skip-git-repo-check", "--sandbox", "read-only", "say ok",
+}
+
+// codexAuthOverrideNames are removed from the renewal subprocess: either would
+// make `codex exec` authenticate with an API key instead of renewing the
+// ChatGPT OAuth chain.
+var codexAuthOverrideNames = []string{"OPENAI_API_KEY", "CODEX_API_KEY"}
+
+func (s *OAuthStrategy) refreshViaCLI(ctx context.Context) (*oauth.Credentials, oauth.CLIRefreshOutcome) {
+	dir := codexRefreshDir()
+	if dir == "" {
+		return nil, oauth.CLIRefreshOutcome{At: time.Now().UTC(), Reason: oauth.CLIRefreshStateError, Hint: oauth.CLIHintUnknown, ExitCode: -1}
+	}
+	creds, outcome := oauth.RefreshViaCLIWithOutcome(ctx, oauth.CLIRefreshConfig{
+		CoordinationDir: dir,
+		BinaryName:      "codex",
+		Args:            codexRenewalArgs,
+		UnsetEnv:        codexAuthOverrideNames,
+		Dir:             os.TempDir(),
+		LoadCredentials: s.loadCredentials,
 	})
+	logging.FromContext(ctx).Debug("Codex CLI renewal", "reason", outcome.Reason, "hint", outcome.Hint,
+		"exit_code", outcome.ExitCode, "duration_ms", outcome.DurationMillis, "retry_at", outcome.RetryAt)
+	return creds, outcome
+}
+
+// codexRefreshDir is shared by every invocation for the same OS user, and with
+// DSH Everything OAuth, even when vibeusage's data/cache directories are
+// overridden. It stores no token material.
+func codexRefreshDir() string {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return ""
+	}
+	return filepath.Join(home, ".cache", "vibeusage", "codex-refresh")
+}
+
+func codexRefreshFailure(outcome oauth.CLIRefreshOutcome) fetch.FetchResult {
+	message := fmt.Sprintf("Codex OAuth renewal failed: %s (CLI hint: %s). Run 'vibeusage auth codex --diagnose' for details.", outcome.Reason, outcome.Hint)
+	if outcome.Hint == oauth.CLIHintLoginRequired || outcome.Hint == oauth.CLIHintRefreshRejected {
+		return fetch.ResultFatal(message + " Sign in again with `codex login`.")
+	}
+	if outcome.Reason == oauth.CLIRefreshCancelled {
+		return fetch.ResultFail(message)
+	}
+	retryAt := outcome.RetryAt
+	if retryAt.IsZero() {
+		retryAt = time.Now().Add(30 * time.Second)
+	}
+	return fetch.ResultThrottled(message, retryAt)
+}
+
+// withTokenExpiry fills a missing expiry from the access token's JWT exp so
+// renewal checks and the coordination state shared with DSH see the token's
+// real lifetime. Codex's auth.json carries no expiry field of its own.
+func withTokenExpiry(creds *oauth.Credentials) *oauth.Credentials {
+	if creds != nil && creds.ExpiresAt == "" {
+		if expiry, ok := oauth.JWTExpiry(creds.AccessToken); ok {
+			creds.ExpiresAt = expiry.Format(time.RFC3339)
+		}
+	}
+	return creds
 }
 
 func (s *OAuthStrategy) fetchUsage(ctx context.Context, client *httpclient.Client, usageURL string, creds *oauth.Credentials) (fetch.FetchResult, bool, error) {
@@ -243,9 +305,11 @@ func (s *OAuthStrategy) fetchResetActivity(ctx context.Context, client *httpclie
 	}
 }
 
+// externalPaths follows CODEX_HOME like the Codex CLI (and the Keychain
+// account derivation below), so a custom profile is never read from the
+// default-profile file.
 func (s *OAuthStrategy) externalPaths() []string {
-	home, _ := os.UserHomeDir()
-	return []string{filepath.Join(home, ".codex", "auth.json")}
+	return []string{filepath.Join(codexHomeDir(), "auth.json")}
 }
 
 func (s *OAuthStrategy) loadCredentials() *oauth.Credentials {
@@ -264,13 +328,13 @@ func (s *OAuthStrategy) loadCredentials() *oauth.Credentials {
 		}
 		if creds := cliCreds.EffectiveCredentials(); creds != nil {
 			cleanupOrphanOAuthSlot()
-			return creds
+			return withTokenExpiry(creds)
 		}
 	}
 
 	if creds := s.loadKeychainCredentials(); creds != nil {
 		cleanupOrphanOAuthSlot()
-		return creds
+		return withTokenExpiry(creds)
 	}
 	return nil
 }

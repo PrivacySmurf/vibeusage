@@ -75,9 +75,13 @@ func (h *cliHints) Write(p []byte) (int, error) {
 		text := h.tail + strings.ToLower(string(p[:size]))
 		p = p[size:]
 		switch {
-		case strings.Contains(text, "invalid refresh token"), strings.Contains(text, "refresh token has been revoked"), strings.Contains(text, "refresh token is invalid"), strings.Contains(text, "refresh token expired"):
+		case strings.Contains(text, "invalid refresh token"), strings.Contains(text, "refresh token has been revoked"), strings.Contains(text, "refresh token is invalid"), strings.Contains(text, "refresh token expired"),
+			// Codex CLI / OpenAI wording for a rotated-away or revoked chain.
+			strings.Contains(text, "refresh token was already used"), strings.Contains(text, "refresh_token_reused"),
+			strings.Contains(text, "token_revoked"), strings.Contains(text, "invalidated oauth token"),
+			strings.Contains(text, "have since logged out"), strings.Contains(text, "log out and sign in again"):
 			h.hint = CLIHintRefreshRejected
-		case strings.Contains(text, "not logged in"), strings.Contains(text, "please run /login"), strings.Contains(text, "please run claude auth login"), strings.Contains(text, "login required"):
+		case strings.Contains(text, "not logged in"), strings.Contains(text, "please run /login"), strings.Contains(text, "please run claude auth login"), strings.Contains(text, "login required"), strings.Contains(text, "codex login"):
 			if h.hint != CLIHintRefreshRejected {
 				h.hint = CLIHintLoginRequired
 			}

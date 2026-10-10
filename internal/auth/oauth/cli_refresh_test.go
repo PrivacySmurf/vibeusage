@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -334,6 +335,28 @@ func runCLIRefreshHelper(scenario, credPath string) int {
 	case "rejected":
 		_, _ = fmt.Fprintln(os.Stderr, "SECRET_SENTINEL invalid refresh token")
 		return 10
+	case "codex-reused":
+		_, _ = fmt.Fprintln(os.Stderr, "SECRET_SENTINEL Error: unexpected status 401 Unauthorized: Your access token could not be refreshed because your refresh token was already used. Please log out and sign in again.")
+		return 1
+	case "codex-logged-out":
+		_, _ = fmt.Fprintln(os.Stderr, "SECRET_SENTINEL Your access token could not be refreshed because you have since logged out or signed in to another account.")
+		return 1
+	case "codex-revoked":
+		_, _ = fmt.Fprintln(os.Stderr, `SECRET_SENTINEL {"error":{"message":"Encountered invalidated oauth token for user, failing request","code":"token_revoked"}}`)
+		return 1
+	case "codex-login":
+		_, _ = fmt.Fprintln(os.Stderr, "SECRET_SENTINEL Authentication is required; run `codex login`.")
+		return 1
+	case "report-env":
+		cwd, err := os.Getwd()
+		if err != nil {
+			return 2
+		}
+		report := fmt.Sprintf("cwd=%s\nOPENAI_API_KEY=%s\nCODEX_API_KEY=%s\nKEEP_ME=%s\n", cwd, os.Getenv("OPENAI_API_KEY"), os.Getenv("CODEX_API_KEY"), os.Getenv("KEEP_ME"))
+		if err := os.WriteFile(credPath+".env", []byte(report), 0o600); err != nil {
+			return 2
+		}
+		return writeCredentials(`{"access_token":"fresh","refresh_token":"ref","expires_at":"2099-01-01T00:00:00Z"}`)
 	case "hold-lock":
 		file, err := os.OpenFile(credPath, os.O_CREATE|os.O_RDWR, 0o600)
 		if err != nil {
@@ -384,5 +407,48 @@ func credLoader(path string) func() *Credentials {
 			return nil
 		}
 		return &creds
+	}
+}
+
+func TestRefreshViaCLI_UnsetEnvAndDir(t *testing.T) {
+	_, credPath := setupFakeCLI(t, "report-env")
+	t.Setenv("OPENAI_API_KEY", "OPENAI_SENTINEL")
+	t.Setenv("CODEX_API_KEY", "CODEX_SENTINEL")
+	t.Setenv("KEEP_ME", "kept")
+	workDir := t.TempDir()
+
+	got := RefreshViaCLI(context.Background(), CLIRefreshConfig{
+		BinaryName:      "testcli",
+		Args:            []string{"refresh"},
+		LoadCredentials: credLoader(credPath),
+		UnsetEnv:        []string{"OPENAI_API_KEY", "CODEX_API_KEY"},
+		Dir:             workDir,
+	})
+	if got == nil {
+		t.Fatal("RefreshViaCLI() = nil, want credentials")
+	}
+	// The poller may stop the helper right after its credential write, but the
+	// report is written first.
+	report, err := os.ReadFile(credPath + ".env")
+	if err != nil {
+		t.Fatalf("read env report: %v", err)
+	}
+	wantDir, err := filepath.EvalSymlinks(workDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := map[string]string{}
+	for _, line := range strings.Split(strings.TrimSpace(string(report)), "\n") {
+		name, value, _ := strings.Cut(line, "=")
+		lines[name] = value
+	}
+	if gotDir, _ := filepath.EvalSymlinks(lines["cwd"]); gotDir != wantDir {
+		t.Errorf("cwd = %q, want %q", lines["cwd"], wantDir)
+	}
+	if lines["OPENAI_API_KEY"] != "" || lines["CODEX_API_KEY"] != "" {
+		t.Errorf("auth overrides leaked into subprocess: %q", report)
+	}
+	if lines["KEEP_ME"] != "kept" {
+		t.Errorf("KEEP_ME = %q, want kept (only named variables are removed)", lines["KEEP_ME"])
 	}
 }

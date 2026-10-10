@@ -289,6 +289,8 @@ vibeusage auth modelstudio --diagnose
 
 Providers with browser-session renewal (Model Studio, MiMo) report the stored session's source and age, CDP endpoint reachability, the live cookie jar by name and partition key only (never values), browser-profile discoverability, throttle markers, and the auto-login cooldown — the state you need when a session silently stops renewing.
 
+Providers whose OAuth login is owned by their CLI (Claude, Codex) report each credential source by presence and expiry only, the CLI binary and its login status, and the last CLI-mediated renewal recorded in the coordination state shared with DSH Everything OAuth.
+
 Set credentials noninteractively. Piping keeps the value out of shell history and process arguments:
 
 ```bash
@@ -490,6 +492,8 @@ vibeusage usage codex
 ```
 
 Run `vibeusage auth codex` to check for Codex CLI credentials and get setup instructions when none are found.
+
+The Codex CLI owns the login: vibeusage reads `$CODEX_HOME/auth.json` (default `~/.codex`) or its Keychain entry but never refreshes or stores Codex tokens itself — OpenAI rotates refresh tokens, so a second holder would silently invalidate the CLI's copy. When the usage API rejects the token, vibeusage asks the CLI to renew its own login with a minimal `codex exec` (ephemeral, user config and rules ignored, read-only sandbox, `OPENAI_API_KEY`/`CODEX_API_KEY` removed) and stops it as soon as a fresh token is on disk. Renewals are serialized through `~/.cache/vibeusage/codex-refresh/`, shared with DSH Everything OAuth, with a 30 s to 5 min failure backoff. If the CLI reports that the login itself is dead, run `codex login`; `vibeusage auth codex --diagnose` shows the state.
 
 #### OpenCode
 

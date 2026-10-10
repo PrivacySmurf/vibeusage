@@ -25,6 +25,10 @@ func TestCLIRefreshOutcomes(t *testing.T) {
 		{"network-error", CLIRefreshFailed, CLIHintNetwork, 8},
 		{"rate-limit", CLIRefreshFailed, CLIHintRateLimited, 9},
 		{"rejected", CLIRefreshFailed, CLIHintRefreshRejected, 10},
+		{"codex-reused", CLIRefreshFailed, CLIHintRefreshRejected, 1},
+		{"codex-logged-out", CLIRefreshFailed, CLIHintRefreshRejected, 1},
+		{"codex-revoked", CLIRefreshFailed, CLIHintRefreshRejected, 1},
+		{"codex-login", CLIRefreshFailed, CLIHintLoginRequired, 1},
 	} {
 		t.Run(tc.scenario, func(t *testing.T) {
 			_, credPath := setupFakeCLI(t, tc.scenario)

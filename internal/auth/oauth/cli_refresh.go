@@ -2,7 +2,10 @@ package oauth
 
 import (
 	"context"
+	"os"
 	"os/exec"
+	"slices"
+	"strings"
 	"time"
 
 	"github.com/joshuadavidthomas/vibeusage/internal/executil"
@@ -18,6 +21,25 @@ type CLIRefreshConfig struct {
 	// CoordinationDir opts into cross-process exclusion and bounded failure
 	// backoff. Callers sharing a CLI credential chain must use the same path.
 	CoordinationDir string
+	// UnsetEnv names environment variables removed from the subprocess so an
+	// ambient API-key override cannot switch the CLI away from its own OAuth
+	// chain during renewal.
+	UnsetEnv []string
+	// Dir is the subprocess working directory; empty inherits the caller's.
+	// A neutral directory keeps project-scoped CLI configuration out of renewal.
+	Dir string
+}
+
+// environWithout returns env minus every entry whose name is in names.
+func environWithout(env []string, names []string) []string {
+	out := make([]string, 0, len(env))
+	for _, entry := range env {
+		name, _, _ := strings.Cut(entry, "=")
+		if !slices.Contains(names, name) {
+			out = append(out, entry)
+		}
+	}
+	return out
 }
 
 // RefreshViaCLI is the compatibility API for callers that only need credentials.
@@ -63,6 +85,12 @@ func runCLIRefresh(ctx context.Context, cfg CLIRefreshConfig) (creds *Credential
 	tctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	cmd := exec.CommandContext(tctx, outcome.BinaryPath, cfg.Args...)
+	if cfg.Dir != "" {
+		cmd.Dir = cfg.Dir
+	}
+	if len(cfg.UnsetEnv) > 0 {
+		cmd.Env = environWithout(os.Environ(), cfg.UnsetEnv)
+	}
 	hints := &cliHints{}
 	cmd.Stdin = nil
 	cmd.Stdout = hints
