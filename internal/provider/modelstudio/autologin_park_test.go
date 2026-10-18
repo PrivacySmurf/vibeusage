@@ -816,10 +816,14 @@ func TestParkLockHelperProcess(t *testing.T) {
 	}
 	release, err := acquireAutoLoginLock()
 	if err != nil {
-		fmt.Fprintf(os.Stdout, "PARK_LOCK_HELPER_ERROR %v\n", err)
+		if _, werr := fmt.Fprintf(os.Stdout, "PARK_LOCK_HELPER_ERROR %v\n", err); werr != nil {
+			t.Fatalf("helper cannot acquire lock: %v (and cannot report it: %v)", err, werr)
+		}
 		t.Fatalf("helper cannot acquire lock: %v", err)
 	}
-	fmt.Fprintln(os.Stdout, parkLockHelperReady)
+	if _, err := fmt.Fprintln(os.Stdout, parkLockHelperReady); err != nil {
+		t.Fatalf("helper cannot signal ready: %v", err)
+	}
 	_, _ = bufio.NewReader(os.Stdin).ReadString(0) // blocks until the parent closes stdin
 	release()
 }
