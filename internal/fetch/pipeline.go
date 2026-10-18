@@ -49,6 +49,10 @@ func ExecutePipeline(ctx context.Context, providerID string, strategies []Strate
 				}
 			}
 			if marker != nil {
+				throttleReason := marker.Reason
+				if throttleReason == "" {
+					throttleReason = "Rate limited"
+				}
 				if cfg.Cache != nil {
 					cached, err := cfg.Cache.Load(providerID)
 					if ctx.Err() != nil {
@@ -59,23 +63,28 @@ func ExecutePipeline(ctx context.Context, providerID string, strategies []Strate
 						cached = nil
 					}
 					if cachedSnapshotMatchesProvider(cached, providerID) {
+						retryAt := marker.RetryAt
+						logger.Warn("serving throttled cache snapshot",
+							"provider", providerID,
+							"retry_at", retryAt.Format(time.RFC3339),
+							"reason", throttleReason,
+							"consecutive_failures", marker.ConsecutiveFailures,
+						)
 						return FetchOutcome{
-							ProviderID: providerID,
-							Success:    true,
-							Snapshot:   cached,
-							Source:     "cache (throttled)",
-							Cached:     true,
+							ProviderID:     providerID,
+							Success:        true,
+							Snapshot:       cached,
+							Source:         SourceCacheThrottled,
+							Cached:         true,
+							ThrottledUntil: &retryAt,
+							ThrottleReason: throttleReason,
 						}
 					}
-				}
-				reason := marker.Reason
-				if reason == "" {
-					reason = "Rate limited"
 				}
 				return FetchOutcome{
 					ProviderID: providerID,
 					Success:    false,
-					Error:      fmt.Sprintf("%s; retry after %s (%d consecutive failures)", reason, marker.RetryAt.Format(time.RFC3339), marker.ConsecutiveFailures),
+					Error:      fmt.Sprintf("%s; retry after %s (%d consecutive failures)", throttleReason, marker.RetryAt.Format(time.RFC3339), marker.ConsecutiveFailures),
 				}
 			}
 		}

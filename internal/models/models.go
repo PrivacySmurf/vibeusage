@@ -230,6 +230,8 @@ type UsageSnapshot struct {
 	Stale            bool              `json:"is_stale"`
 	Freshness        string            `json:"freshness,omitempty"`
 	Cached           bool              `json:"cached"`
+	ThrottledUntil   *time.Time        `json:"throttled_until,omitempty"`
+	ThrottleReason   string            `json:"throttle_reason,omitempty"`
 }
 
 func (s UsageSnapshot) PrimaryPeriod() *UsagePeriod {

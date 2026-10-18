@@ -658,3 +658,206 @@ func TestOutputStatusJSON_Structure(t *testing.T) {
 		t.Errorf("copilot should not have updated_at, got %q", copilot.UpdatedAt)
 	}
 }
+
+func decodeRawProviders(t *testing.T, data []byte) map[string]map[string]any {
+	t.Helper()
+	var raw struct {
+		Providers map[string]map[string]any `json:"providers"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		t.Fatalf("output is not valid JSON: %v", err)
+	}
+	return raw.Providers
+}
+
+func TestOutputMultiProviderJSON_ThrottledCacheOverwritesSourceAndAddsMetadata(t *testing.T) {
+	now := time.Now()
+	retryAt := now.Add(15 * time.Minute).UTC().Truncate(time.Second)
+
+	// Two providers (one not modelstudio): stored snapshots keep an older
+	// strategy source ("web"/"oauth") that must not leak through.
+	cases := map[string]struct {
+		storedSource string
+		reason       string
+	}{
+		"modelstudio": {storedSource: "web", reason: "Rate limited by Alibaba"},
+		"claude":      {storedSource: "oauth", reason: "Rate limited"},
+	}
+
+	outcomes := map[string]fetch.FetchOutcome{}
+	for pid, tc := range cases {
+		until := retryAt
+		outcomes[pid] = fetch.FetchOutcome{
+			ProviderID:     pid,
+			Success:        true,
+			Source:         fetch.SourceCacheThrottled,
+			Cached:         true,
+			ThrottledUntil: &until,
+			ThrottleReason: tc.reason,
+			Snapshot: &models.UsageSnapshot{
+				Provider:  pid,
+				FetchedAt: now.Add(-2 * time.Hour),
+				Periods:   []models.UsagePeriod{{Name: "Session", Utilization: 10}},
+				Source:    tc.storedSource,
+			},
+		}
+	}
+
+	var buf bytes.Buffer
+	if err := OutputMultiProviderJSON(&buf, outcomes); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	raw := decodeRawProviders(t, buf.Bytes())
+
+	for pid, tc := range cases {
+		p, ok := raw[pid]
+		if !ok {
+			t.Fatalf("provider %q missing from output", pid)
+		}
+		if p["source"] != fetch.SourceCacheThrottled {
+			t.Errorf("%s: source=%v, want %q", pid, p["source"], fetch.SourceCacheThrottled)
+		}
+		if p["freshness"] != "fallback_stale" || p["is_stale"] != true || p["cached"] != true {
+			t.Errorf("%s: freshness=%v is_stale=%v cached=%v; want fallback_stale, true, true", pid, p["freshness"], p["is_stale"], p["cached"])
+		}
+		gotUntil, _ := p["throttled_until"].(string)
+		parsed, err := time.Parse(time.RFC3339, gotUntil)
+		if err != nil {
+			t.Fatalf("%s: throttled_until %q is not RFC3339: %v", pid, gotUntil, err)
+		}
+		if !parsed.Equal(retryAt) {
+			t.Errorf("%s: throttled_until=%s, want %s", pid, parsed, retryAt)
+		}
+		if p["throttle_reason"] != tc.reason {
+			t.Errorf("%s: throttle_reason=%v, want %q", pid, p["throttle_reason"], tc.reason)
+		}
+		if age, _ := p["data_age_seconds"].(float64); age < 7000 {
+			t.Errorf("%s: data_age_seconds=%v, want >= 7000", pid, p["data_age_seconds"])
+		}
+	}
+}
+
+func TestOutputMultiProviderJSON_NonThrottledOmitsThrottleKeysAndKeepsSource(t *testing.T) {
+	now := time.Now()
+	stale := now.Add(time.Hour)
+	outcomes := map[string]fetch.FetchOutcome{
+		"live": {
+			ProviderID: "live",
+			Success:    true,
+			Source:     "web",
+			Snapshot: &models.UsageSnapshot{
+				Provider:  "live",
+				FetchedAt: now,
+				Periods:   []models.UsagePeriod{{Name: "Session", Utilization: 1}},
+				Source:    "web",
+			},
+		},
+		"fresh_cache": {
+			ProviderID: "fresh_cache",
+			Success:    true,
+			Source:     "cache",
+			Cached:     true,
+			Snapshot: &models.UsageSnapshot{
+				Provider:  "fresh_cache",
+				FetchedAt: now.Add(-30 * time.Second),
+				Periods:   []models.UsagePeriod{{Name: "Session", Utilization: 2}},
+				Source:    "web",
+			},
+		},
+		// A stored snapshot carrying stale throttle data must never leak into
+		// a non-throttled outcome.
+		"leaky_stored": {
+			ProviderID: "leaky_stored",
+			Success:    true,
+			Source:     "cache",
+			Cached:     true,
+			Snapshot: &models.UsageSnapshot{
+				Provider:       "leaky_stored",
+				FetchedAt:      now.Add(-30 * time.Second),
+				Periods:        []models.UsagePeriod{{Name: "Session", Utilization: 3}},
+				Source:         "web",
+				ThrottledUntil: &stale,
+				ThrottleReason: "old",
+			},
+		},
+	}
+
+	var buf bytes.Buffer
+	if err := OutputMultiProviderJSON(&buf, outcomes); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	raw := decodeRawProviders(t, buf.Bytes())
+
+	for _, pid := range []string{"live", "fresh_cache", "leaky_stored"} {
+		p := raw[pid]
+		if p["source"] != "web" {
+			t.Errorf("%s: source=%v, want web", pid, p["source"])
+		}
+		for _, key := range []string{"throttled_until", "throttle_reason"} {
+			if _, present := p[key]; present {
+				t.Errorf("%s: unexpected key %q in JSON", pid, key)
+			}
+		}
+	}
+	if raw["live"]["freshness"] != "live" || raw["fresh_cache"]["freshness"] != "cached_fresh" {
+		t.Errorf("freshness changed: live=%v fresh_cache=%v", raw["live"]["freshness"], raw["fresh_cache"]["freshness"])
+	}
+}
+
+func TestSnapshotToJSON_ThrottledCacheSingleProvider(t *testing.T) {
+	retryAt := time.Now().Add(10 * time.Minute).UTC().Truncate(time.Second)
+	outcome := fetch.FetchOutcome{
+		ProviderID:     "mimo",
+		Success:        true,
+		Source:         fetch.SourceCacheThrottled,
+		Cached:         true,
+		ThrottledUntil: &retryAt,
+		ThrottleReason: "Rate limited",
+		Snapshot: &models.UsageSnapshot{
+			Provider:  "mimo",
+			FetchedAt: time.Now().Add(-time.Hour),
+			Periods:   []models.UsagePeriod{{Name: "Monthly", Utilization: 5}},
+			Source:    "web",
+		},
+	}
+
+	data, err := json.Marshal(SnapshotToJSON(outcome))
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(data, &raw); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if raw["source"] != fetch.SourceCacheThrottled {
+		t.Errorf("source=%v, want %q", raw["source"], fetch.SourceCacheThrottled)
+	}
+	if raw["freshness"] != "fallback_stale" || raw["is_stale"] != true {
+		t.Errorf("freshness=%v is_stale=%v; want fallback_stale, true", raw["freshness"], raw["is_stale"])
+	}
+	if got, _ := raw["throttled_until"].(string); got != retryAt.Format(time.RFC3339) {
+		t.Errorf("throttled_until=%v, want %s", raw["throttled_until"], retryAt.Format(time.RFC3339))
+	}
+	if raw["throttle_reason"] != "Rate limited" {
+		t.Errorf("throttle_reason=%v", raw["throttle_reason"])
+	}
+
+	// Same snapshot, non-throttled outcome: keep source, no throttle keys.
+	live := outcome
+	live.Source = "web"
+	live.Cached = false
+	live.ThrottledUntil = nil
+	live.ThrottleReason = ""
+	data, _ = json.Marshal(SnapshotToJSON(live))
+	raw = map[string]any{}
+	_ = json.Unmarshal(data, &raw)
+	if raw["source"] != "web" {
+		t.Errorf("live source=%v, want web", raw["source"])
+	}
+	if _, ok := raw["throttled_until"]; ok {
+		t.Error("live outcome must omit throttled_until")
+	}
+	if _, ok := raw["throttle_reason"]; ok {
+		t.Error("live outcome must omit throttle_reason")
+	}
+}

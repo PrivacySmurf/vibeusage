@@ -16,6 +16,14 @@ func OutputJSON(w io.Writer, data any) error {
 	return enc.Encode(data)
 }
 
+func copyTime(t *time.Time) *time.Time {
+	if t == nil {
+		return nil
+	}
+	c := *t
+	return &c
+}
+
 func enrichSnapshotFreshness(snap *models.UsageSnapshot, outcome fetch.FetchOutcome) {
 	age := int(time.Since(snap.FetchedAt).Seconds())
 	if age < 0 {
@@ -34,6 +42,14 @@ func enrichSnapshotFreshness(snap *models.UsageSnapshot, outcome fetch.FetchOutc
 		snap.Freshness = "fallback_stale"
 		snap.Stale = true
 	}
+	if outcome.Cached && outcome.Source == fetch.SourceCacheThrottled {
+		snap.Source = fetch.SourceCacheThrottled
+		snap.ThrottledUntil = copyTime(outcome.ThrottledUntil)
+		snap.ThrottleReason = outcome.ThrottleReason
+		return
+	}
+	snap.ThrottledUntil = nil
+	snap.ThrottleReason = ""
 	if snap.Source == "" && outcome.Source != "" {
 		snap.Source = outcome.Source
 	}

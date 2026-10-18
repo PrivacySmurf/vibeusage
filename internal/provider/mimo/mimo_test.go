@@ -136,6 +136,7 @@ func TestWebConsoleStrategy_FetchSuccess(t *testing.T) {
 	snap := res.Snapshot
 	require.NotNil(t, snap)
 	assert.Equal(t, "mimo", snap.Provider)
+	assert.Equal(t, "web", snap.Source, "live web fetch must keep strategy provenance")
 	require.NotNil(t, snap.Billing)
 	assert.Equal(t, 128.50, *snap.Billing.Balance)
 	require.NotNil(t, snap.Identity)

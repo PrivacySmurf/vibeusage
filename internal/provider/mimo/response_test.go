@@ -1,6 +1,7 @@
 package mimo
 
 import (
+	"encoding/json"
 	"testing"
 	"time"
 
@@ -130,4 +131,33 @@ func TestParseSnapshot_BalanceOnly(t *testing.T) {
 	assert.Equal(t, 10.00, *snapshot.Billing.Balance)
 	assert.Empty(t, snapshot.Periods)
 	assert.Nil(t, snapshot.Identity)
+}
+
+func TestParseSnapshot_SetsSourceWeb(t *testing.T) {
+	balanceJSON := []byte(`{"code":0,"message":"success","data":{"balance":"10.00","currency":"CNY"}}`)
+
+	snapshot, err := parseSnapshot(balanceJSON, nil, nil, time.Now())
+	require.NoError(t, err)
+
+	assert.Equal(t, "web", snapshot.Source)
+}
+
+func TestParseSnapshot_SourceSurvivesJSONRoundTrip(t *testing.T) {
+	balanceJSON := []byte(`{"code":0,"message":"success","data":{"balance":"10.00","currency":"CNY"}}`)
+
+	snapshot, err := parseSnapshot(balanceJSON, nil, nil, time.Now())
+	require.NoError(t, err)
+
+	data, err := json.Marshal(snapshot)
+	require.NoError(t, err)
+
+	var raw map[string]any
+	require.NoError(t, json.Unmarshal(data, &raw))
+	assert.Equal(t, "web", raw["source"])
+
+	var decoded models.UsageSnapshot
+	require.NoError(t, json.Unmarshal(data, &decoded))
+	assert.Equal(t, "web", decoded.Source)
+	assert.Nil(t, decoded.ThrottledUntil)
+	assert.Empty(t, decoded.ThrottleReason)
 }

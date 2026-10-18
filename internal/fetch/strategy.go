@@ -96,6 +96,10 @@ func ResultThrottled(err string, retryAfter time.Time) FetchResult {
 	}
 }
 
+// SourceCacheThrottled is the outcome source used when a cached snapshot is
+// served because a throttle marker is active.
+const SourceCacheThrottled = "cache (throttled)"
+
 // FetchOutcome is the complete result of fetching from a provider.
 type FetchOutcome struct {
 	ProviderID     string                `json:"provider_id"`
@@ -106,6 +110,11 @@ type FetchOutcome struct {
 	RecordingError string                `json:"-"`
 	Recorded       bool                  `json:"-"`
 	Cached         bool                  `json:"cached"`
+
+	// ThrottledUntil and ThrottleReason are set only when the snapshot was
+	// served from cache because a persisted throttle marker is active.
+	ThrottledUntil *time.Time `json:"throttled_until,omitempty"`
+	ThrottleReason string     `json:"throttle_reason,omitempty"`
 }
 
 // Strategy is the interface all fetch strategies must implement.

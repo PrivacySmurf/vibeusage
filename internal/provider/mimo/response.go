@@ -158,6 +158,7 @@ func parseSnapshot(balanceBytes, detailBytes, usageBytes []byte, now time.Time) 
 	snapshot := &models.UsageSnapshot{
 		Provider:  "mimo",
 		FetchedAt: now,
+		Source:    "web",
 		Billing: &models.BillingDetail{
 			Balance: &balFloat,
 		},

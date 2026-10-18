@@ -2,6 +2,7 @@ package fetch
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"reflect"
@@ -1485,6 +1486,121 @@ func TestExecutePipeline_ThrottleMarkerServesCacheWithoutFetch(t *testing.T) {
 	}
 	if fetchCalled {
 		t.Error("expected throttle marker to skip live fetch")
+	}
+}
+
+func TestExecutePipeline_ThrottledCacheServeExposesMarkerAndWarns(t *testing.T) {
+	retryAt := time.Now().Add(10 * time.Minute).UTC().Truncate(time.Second)
+	cases := []struct {
+		name       string
+		reason     string
+		wantReason string
+	}{
+		{"marker reason", "Rate limited by Alibaba", "Rate limited by Alibaba"},
+		{"empty reason defaults", "", "Rate limited"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cache := newMemCache()
+			cache.data["modelstudio"] = models.UsageSnapshot{
+				Provider:  "modelstudio",
+				FetchedAt: time.Now().Add(-time.Hour).UTC(),
+				Periods:   []models.UsagePeriod{{Name: "monthly", Utilization: 42}},
+				Source:    "web",
+			}
+			throttles := newMemThrottles()
+			throttles.data["modelstudio"] = ThrottleMarker{RetryAt: retryAt, Reason: tc.reason, ConsecutiveFailures: 3}
+
+			strategy := &mockStrategy{
+				available: true,
+				fetchFn: func(context.Context) (FetchResult, error) {
+					t.Error("throttle marker must skip live fetch")
+					return FetchResult{}, nil
+				},
+			}
+			ctx, logs := logging.NewTestContext(logging.Flags{NoColor: true, JSON: true})
+			outcome := ExecutePipeline(ctx, "modelstudio", []Strategy{strategy}, true, PipelineConfig{
+				Timeout:   30 * time.Second,
+				Cache:     cache,
+				Throttles: throttles,
+			})
+
+			if !outcome.Success || !outcome.Cached {
+				t.Fatalf("expected cached success, got %+v", outcome)
+			}
+			if outcome.Source != SourceCacheThrottled {
+				t.Errorf("Source = %q, want %q", outcome.Source, SourceCacheThrottled)
+			}
+			if outcome.ThrottledUntil == nil || !outcome.ThrottledUntil.Equal(retryAt) {
+				t.Errorf("ThrottledUntil = %v, want %v", outcome.ThrottledUntil, retryAt)
+			}
+			if outcome.ThrottleReason != tc.wantReason {
+				t.Errorf("ThrottleReason = %q, want %q", outcome.ThrottleReason, tc.wantReason)
+			}
+			for _, want := range []string{
+				"serving throttled cache snapshot",
+				"modelstudio",
+				tc.wantReason,
+				retryAt.Format(time.RFC3339),
+			} {
+				if !strings.Contains(logs.String(), want) {
+					t.Errorf("log output %q does not contain %q", logs.String(), want)
+				}
+			}
+
+			// The record must be emitted at WARN exactly (not ERROR, not INFO).
+			var found bool
+			for _, line := range strings.Split(strings.TrimSpace(logs.String()), "\n") {
+				var rec map[string]any
+				if err := json.Unmarshal([]byte(line), &rec); err != nil {
+					t.Fatalf("log line is not JSON: %q: %v", line, err)
+				}
+				if rec["msg"] != "serving throttled cache snapshot" {
+					continue
+				}
+				found = true
+				if rec["level"] != "warn" {
+					t.Errorf("throttled-cache log level = %v, want warn", rec["level"])
+				}
+				if rec["provider"] != "modelstudio" {
+					t.Errorf("throttled-cache log provider = %v, want modelstudio", rec["provider"])
+				}
+				if rec["reason"] != tc.wantReason {
+					t.Errorf("throttled-cache log reason = %v, want %q", rec["reason"], tc.wantReason)
+				}
+				if rec["retry_at"] != retryAt.Format(time.RFC3339) {
+					t.Errorf("throttled-cache log retry_at = %v, want %s", rec["retry_at"], retryAt.Format(time.RFC3339))
+				}
+			}
+			if !found {
+				t.Errorf("no %q record in log output %q", "serving throttled cache snapshot", logs.String())
+			}
+		})
+	}
+}
+
+func TestExecutePipeline_ThrottleFieldsEmptyOnLiveFetch(t *testing.T) {
+	strategy := &mockStrategy{
+		available: true,
+		fetchFn: func(context.Context) (FetchResult, error) {
+			return ResultOK(testSnapshot("test-provider", "mock", 10)), nil
+		},
+	}
+	ctx, logs := logging.NewTestContext(logging.Flags{NoColor: true})
+	outcome := ExecutePipeline(ctx, "test-provider", []Strategy{strategy}, true, PipelineConfig{
+		Timeout:   30 * time.Second,
+		Cache:     newMemCache(),
+		Throttles: newMemThrottles(),
+	})
+
+	if !outcome.Success || outcome.Cached {
+		t.Fatalf("expected live success, got %+v", outcome)
+	}
+	if outcome.ThrottledUntil != nil || outcome.ThrottleReason != "" {
+		t.Errorf("live outcome has throttle fields: until=%v reason=%q", outcome.ThrottledUntil, outcome.ThrottleReason)
+	}
+	if strings.Contains(logs.String(), "serving throttled cache snapshot") {
+		t.Errorf("unexpected throttled-cache warn on live fetch: %q", logs.String())
 	}
 }
 
