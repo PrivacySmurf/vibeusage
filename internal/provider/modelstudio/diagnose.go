@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"sort"
@@ -41,6 +42,7 @@ func (m ModelStudio) DiagnoseAuth(ctx context.Context) []provider.Diagnostic {
 	diags = append(diags,
 		diagnoseModelStudioBrowserProfiles(),
 		diagnoseModelStudioThrottle(),
+		diagnoseModelStudioAutoLogin(),
 	)
 	return diags
 }
@@ -279,6 +281,33 @@ func diagnoseModelStudioThrottle() provider.Diagnostic {
 		Status: provider.DiagInfo,
 		Detail: "no active throttle marker",
 	}
+}
+
+// diagnoseModelStudioAutoLogin reports whether automatic sign-in is parked
+// after an Alibaba verification or captcha. Only the marker's kind, reason
+// and time are shown; no cookie or password value is ever read here.
+func diagnoseModelStudioAutoLogin() provider.Diagnostic {
+	const name = "Auto-login"
+	park, parked := loadLoginPark()
+	if parked {
+		detail := fmt.Sprintf("%s after %s", errAutoLoginParked.Error(), park.Kind.classWording())
+		if park.Kind == loginBlockerPending || park.Kind == loginBlockerUnknown {
+			detail += fmt.Sprintf(" (marker: %s)", park.Reason)
+		}
+		if !park.ParkedAt.IsZero() {
+			detail += fmt.Sprintf("; parked since %s (%s ago)",
+				park.ParkedAt.Format(time.RFC3339), time.Since(park.ParkedAt).Round(time.Second))
+		}
+		detail += fmt.Sprintf("; sign in manually at %s in the Chrome on port %s; "+
+			"the park clears automatically once a signed-in session is imported or saved "+
+			"(escape hatch: delete %s)",
+			modelStudioDashboardURL, loginGuidancePort(), loginParkMarker())
+		return provider.Diagnostic{Name: name, Status: provider.DiagWarn, Detail: detail}
+	}
+	if _, _, err := autoLoginSettings(); errors.Is(err, errAutoLoginUnavailable) {
+		return provider.Diagnostic{Name: name, Status: provider.DiagInfo, Detail: "not configured (no login_command); not parked"}
+	}
+	return provider.Diagnostic{Name: name, Status: provider.DiagInfo, Detail: "not parked"}
 }
 
 // modelStudioSourceLabel humanizes the stored session source constant.

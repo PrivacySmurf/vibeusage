@@ -91,6 +91,8 @@ func (s *WebConsoleStrategy) Fetch(ctx context.Context) (fetch.FetchResult, erro
 
 	snapshot, err := s.fetchWithSession(ctx, client, creds)
 	if err == nil {
+		// A stored or environment session that works is a real recovery.
+		clearLoginPark()
 		return fetch.ResultOK(*snapshot), nil
 	}
 	if !errors.Is(err, errModelStudioSession) {
@@ -173,7 +175,7 @@ func (s *WebConsoleStrategy) fetchImportedBrowserSession(
 				case loginErr == nil:
 					imported, importErr = session, nil
 				case !errors.Is(loginErr, errAutoLoginUnavailable):
-					importErr = fmt.Errorf("%w; automatic sign-in failed: %v", importErr, loginErr)
+					importErr = fmt.Errorf("%w; %w", importErr, autoLoginFailure(loginErr))
 				}
 			}
 			if importErr != nil {
@@ -193,7 +195,9 @@ func (s *WebConsoleStrategy) fetchImportedBrowserSession(
 			// authenticated quota request. The credentials store is
 			// permission-restricted to the user.
 			if data, marshalErr := json.Marshal(creds); marshalErr == nil {
-				_ = config.WriteCredential("modelstudio", "session", data)
+				if config.WriteCredential("modelstudio", "session", data) == nil {
+					clearLoginPark()
+				}
 			}
 			return fetch.ResultOK(*snapshot), nil
 		}
@@ -213,7 +217,7 @@ func (s *WebConsoleStrategy) fetchImportedBrowserSession(
 		if loginErr != nil {
 			var hintErr error
 			if !errors.Is(loginErr, errAutoLoginUnavailable) {
-				hintErr = fmt.Errorf("automatic sign-in failed: %w", loginErr)
+				hintErr = autoLoginFailure(loginErr)
 			}
 			return fetch.ResultThrottled(modelStudioSessionHint(creds, hintErr), time.Now().Add(modelStudioSessionCooldown)), nil
 		}
@@ -229,16 +233,64 @@ func (s *WebConsoleStrategy) autoLogin(ctx context.Context) (browserSession, err
 	if err != nil {
 		return browserSession{}, err
 	}
+	// Serialize automatic attempts across processes before any park or
+	// cooldown read, so a concurrent attempt cannot overwrite or clear
+	// another attempt's guard. Ownership is held until this function returns.
+	release, lockErr := acquireModelStudioLoginLock()
+	if lockErr != nil {
+		if errors.Is(lockErr, errAutoLoginInProgress) {
+			return browserSession{}, lockErr
+		}
+		return browserSession{}, fmt.Errorf("%w: cannot acquire park guard lock: %w", errAutoLoginGuardUnavailable, lockErr)
+	}
+	defer release()
+	// A park outranks every time-based brake: refuse before the cooldown
+	// marker is touched and before login_command can run.
+	if park, parked := loadLoginPark(); parked {
+		return browserSession{}, &loginParkedError{Kind: park.Kind, Port: port}
+	}
 	if last := lastLoginAttempt(); !last.IsZero() && time.Since(last) < loginCooldown {
 		return browserSession{}, fmt.Errorf("%w (%s ago); next attempt after %s",
 			errAutoLoginCoolingDown, time.Since(last).Round(time.Second), loginCooldown)
 	}
+	// Fail closed: record a provisional park guard before anything that can
+	// reach Alibaba (login_command, the driver, even the attempt marker). If
+	// the guard cannot be stored, a blocker (or a crash) could not be
+	// remembered by the next process, so no automation starts at all.
+	if err := writeLoginPark(loginBlockerPending, pendingGuardReason, time.Now()); err != nil {
+		return browserSession{}, fmt.Errorf("%w: cannot record park guard: %w", errAutoLoginGuardUnavailable, err)
+	}
 	recordLoginAttempt(time.Now())
 	creds, err := loadLoginCredentials(ctx, command)
 	if err != nil {
+		clearLoginPark() // a credential-command failure is not a blocker
 		return browserSession{}, err
 	}
-	return autoLoginModelStudio(ctx, port, creds)
+	session, err := autoLoginModelStudio(ctx, port, creds)
+	var blocked *loginBlockedError
+	if errors.As(err, &blocked) {
+		// Convert the provisional guard into the real park. If that write
+		// fails the provisional guard still parks auto-login; say so.
+		parked := &loginParkedError{Kind: blocked.Kind, Port: port}
+		if writeErr := writeLoginPark(blocked.Kind, blocked.Reason, time.Now()); writeErr != nil {
+			parked.MarkerErr = writeErr
+		}
+		return browserSession{}, parked
+	}
+	// Success, a form error, a timeout or any other non-blocker outcome:
+	// release the guard. A panic or crash before this point leaves it in
+	// place on purpose.
+	clearLoginPark()
+	return session, err
+}
+
+// autoLoginFailure words an automatic sign-in error for the session hint.
+// A park reads as a state to act on, not as another failed attempt.
+func autoLoginFailure(err error) error {
+	if errors.Is(err, errAutoLoginParked) || errors.Is(err, errAutoLoginGuardUnavailable) || errors.Is(err, errAutoLoginInProgress) {
+		return err
+	}
+	return fmt.Errorf("automatic sign-in failed: %w", err)
 }
 
 // ExtendTimeout gives Fetch room for a browser sign-in on top of the normal
@@ -246,6 +298,9 @@ func (s *WebConsoleStrategy) autoLogin(ctx context.Context) (browserSession, err
 func (s *WebConsoleStrategy) ExtendTimeout(base time.Duration) time.Duration {
 	if _, _, err := autoLoginSettings(); err != nil {
 		return base
+	}
+	if _, parked := loadLoginPark(); parked {
+		return base // no sign-in will run, so no budget is needed
 	}
 	return base + loginOverallDeadline
 }

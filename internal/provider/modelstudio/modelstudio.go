@@ -65,7 +65,7 @@ func (m ModelStudio) AcceptCredential(credential string) error {
 		if err != nil {
 			return fmt.Errorf("marshal modelstudio cookie credential: %w", err)
 		}
-		return config.WriteCredential("modelstudio", "session", data)
+		return writeSessionCredential(data)
 	}
 
 	// 2. AccessKeyID:AccessKeySecret or JSON
@@ -88,7 +88,7 @@ func (m ModelStudio) AcceptCredential(credential string) error {
 				if err != nil {
 					return fmt.Errorf("marshal modelstudio cookie credential: %w", err)
 				}
-				return config.WriteCredential("modelstudio", "session", data)
+				return writeSessionCredential(data)
 			}
 			if creds.AccessKeyID != "" {
 				keyID = creds.AccessKeyID
@@ -131,7 +131,18 @@ func (m ModelStudio) AcceptCredential(credential string) error {
 	if err != nil {
 		return fmt.Errorf("marshal modelstudio credential: %w", err)
 	}
-	return config.WriteCredential("modelstudio", "session", data)
+	return writeSessionCredential(data)
+}
+
+// writeSessionCredential stores a pasted or imported session and, on success,
+// lifts any auto-login park: a signed-in session now exists. The OpenAPI key
+// path never calls this.
+func writeSessionCredential(data []byte) error {
+	if err := config.WriteCredential("modelstudio", "session", data); err != nil {
+		return err
+	}
+	clearLoginPark()
+	return nil
 }
 
 func (m ModelStudio) Auth() provider.AuthFlow {

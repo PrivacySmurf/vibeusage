@@ -40,12 +40,15 @@ const (
 	// iframe under this path; its presence is the reliable signal.
 	loginCaptchaFramePath = "/_____tmd_____/punish"
 	captchaBlockedReason  = "sign-in blocked by a slider captcha (Alibaba risk control after repeated logins); sign in manually once in this browser"
-	loginErrorSel         = ".fm-error, .error-message, .next-form-item-help"
-	loginFormWait         = 20 * time.Second
-	loginMaxAttempts      = 3
-	loginPollInterval     = 500 * time.Millisecond
-	loginCommandTimeout   = 30 * time.Second
-	loginOverallDeadline  = 90 * time.Second
+	// verificationBlockedReason labels Alibaba's account-protection page
+	// ("To protect your account, please complete the verification"), which
+	// wants a code texted to the account's phone. It is not a slider.
+	verificationBlockedReason = "sign-in blocked by Alibaba account verification (SMS / account-protection code required); sign in manually once in this browser"
+	loginErrorSel             = ".fm-error, .error-message, .next-form-item-help"
+	loginMaxAttempts          = 3
+	loginPollInterval         = 500 * time.Millisecond
+	loginCommandTimeout       = 30 * time.Second
+	loginOverallDeadline      = 90 * time.Second
 	// loginCooldown is the minimum gap between automatic sign-in attempts,
 	// whatever their outcome. Repeated logins are what trip Alibaba's risk
 	// control (slider captcha), so a broken flow must fail quietly, not loop.
@@ -54,14 +57,23 @@ const (
 
 // Tunable so tests can run the retry path quickly.
 var (
+	loginFormWait     = 20 * time.Second
 	loginFormSettle   = 750 * time.Millisecond
 	loginRedirectWait = 15 * time.Second
 	loginCookieWait   = 15 * time.Second
 )
 
 var (
-	errAutoLoginUnavailable  = errors.New("automatic sign-in not configured")
-	errAutoLoginCoolingDown  = errors.New("automatic sign-in attempted recently")
+	errAutoLoginUnavailable = errors.New("automatic sign-in not configured")
+	errAutoLoginCoolingDown = errors.New("automatic sign-in attempted recently")
+	errAutoLoginParked      = errors.New("automatic sign-in is parked pending manual sign-in")
+	// errAutoLoginGuardUnavailable means the provisional park guard could not
+	// be recorded, so no sign-in was started. It is deliberately not a park
+	// and not "unavailable": nothing is parked and sign-in is configured.
+	errAutoLoginGuardUnavailable = errors.New("automatic sign-in not attempted")
+	// errAutoLoginInProgress means another process (or goroutine) owns the
+	// automatic sign-in lock, so this attempt did not start.
+	errAutoLoginInProgress   = errors.New("automatic sign-in not attempted: another automatic sign-in is in progress")
 	errLoginNoRedirect       = errors.New("no redirect to the console after submitting")
 	errLoginNoSessionCookies = errors.New("console session cookies did not appear after sign-in")
 )
@@ -125,6 +137,216 @@ func recordLoginAttempt(at time.Time) {
 	}
 	_ = os.WriteFile(path, data, 0o600)
 }
+
+// loginBlockerKind classifies why Alibaba refused an automatic sign-in.
+type loginBlockerKind string
+
+const (
+	loginBlockerVerification loginBlockerKind = "verification"
+	loginBlockerCaptcha      loginBlockerKind = "captcha"
+	// loginBlockerUnknown is only used for a park marker that cannot be read.
+	loginBlockerUnknown loginBlockerKind = "unknown"
+	// loginBlockerPending marks the provisional guard written before an
+	// automatic sign-in starts. It is converted to a real blocker kind when
+	// the attempt reports one and removed when the attempt ends without a
+	// blocker; a guard that survives means the attempt never finished, which
+	// is treated as a possible blocker (fail closed).
+	loginBlockerPending loginBlockerKind = "pending"
+)
+
+// pendingGuardReason is the reason stored in the provisional park guard.
+const pendingGuardReason = "an automatic sign-in attempt started and did not finish"
+
+// loginBlockedError reports an interactive blocker (account verification or
+// captcha) that a scripted password login cannot get past. Callers park
+// automatic sign-in when they see one.
+type loginBlockedError struct {
+	Kind   loginBlockerKind
+	Reason string
+}
+
+func (e *loginBlockedError) Error() string { return e.Reason }
+
+// loginBlockerSignals is what the passport-frame probe observed.
+type loginBlockerSignals struct {
+	Checkcode bool   `json:"checkcode"`
+	Captcha   bool   `json:"captcha"`
+	Text      string `json:"text"`
+	FormError string `json:"err"`
+}
+
+// verificationTextMarkers are lower-case fragments of Alibaba's
+// account-protection copy.
+var verificationTextMarkers = []string{
+	"protect your account",
+	"complete the verification",
+	"account protection",
+	"identity verification",
+	"security verification",
+}
+
+func looksLikeVerificationText(text string) bool {
+	lower := strings.ToLower(text)
+	for _, marker := range verificationTextMarkers {
+		if strings.Contains(lower, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+// classifyLoginBlocker decides what the sign-in page is showing. Verification
+// evidence wins over captcha evidence: the account-protection page can sit
+// next to elements that match the captcha selector without any slider.
+// Form errors come back untyped (kind "") with a "sign-in rejected" reason;
+// they are not interactive blockers and never park auto-login.
+func classifyLoginBlocker(tmdFrame bool, passport loginBlockerSignals, topText string) (loginBlockerKind, string) {
+	if passport.Checkcode || looksLikeVerificationText(passport.Text) || looksLikeVerificationText(topText) {
+		return loginBlockerVerification, verificationBlockedReason
+	}
+	if tmdFrame || passport.Captcha {
+		return loginBlockerCaptcha, captchaBlockedReason
+	}
+	if passport.FormError != "" {
+		return "", "sign-in rejected: " + passport.FormError
+	}
+	return "", ""
+}
+
+// The park marker survives across processes (each poll is a new process).
+// While it exists, automatic sign-in is refused outright: repeating scripted
+// password logins against an interactive blocker only feeds Alibaba's risk
+// control. It is cleared only when a usable session is obtained some other
+// way (see clearLoginPark callers), never by a cooldown expiring.
+func loginParkMarker() string {
+	return filepath.Join(config.ThrottlesDir(), "modelstudio-login-park.json")
+}
+
+type loginPark struct {
+	Kind     loginBlockerKind `json:"kind"`
+	Reason   string           `json:"reason"`
+	ParkedAt time.Time        `json:"parked_at"`
+}
+
+// loadLoginPark reports whether auto-login is parked. A marker that exists
+// but cannot be read or parsed still counts as parked (kind "unknown"): the
+// brake must fail closed.
+func loadLoginPark() (loginPark, bool) {
+	data, err := os.ReadFile(loginParkMarker())
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return loginPark{}, false
+		}
+		return loginPark{Kind: loginBlockerUnknown, Reason: "park marker unreadable: " + err.Error()}, true
+	}
+	var park loginPark
+	if err := json.Unmarshal(data, &park); err != nil {
+		return loginPark{Kind: loginBlockerUnknown, Reason: "park marker unparseable"}, true
+	}
+	if park.Kind == "" {
+		park.Kind = loginBlockerUnknown
+	}
+	return park, true
+}
+
+// acquireAutoLoginLock takes the cross-process lock that serializes automatic
+// sign-in attempts. The lock file is persistent and never removed, so every
+// process locks the same inode. The OS releases the lock if the holder dies.
+func acquireAutoLoginLock() (func(), error) {
+	path := filepath.Join(config.ThrottlesDir(), "modelstudio-login.lock")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return nil, err
+	}
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return nil, err
+	}
+	if err := tryAutoLoginLock(file); err != nil {
+		_ = file.Close()
+		return nil, err
+	}
+	return func() {
+		_ = unlockAutoLoginFile(file)
+		_ = file.Close()
+	}, nil
+}
+
+// acquireModelStudioLoginLock is swapped out in tests.
+var acquireModelStudioLoginLock = acquireAutoLoginLock
+
+// writeLoginParkFile persists the park marker. It is a seam so tests can
+// inject write failures without relying on file permissions.
+var writeLoginParkFile = func(path string, data []byte) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return err
+	}
+	return os.WriteFile(path, data, 0o600)
+}
+
+func writeLoginPark(kind loginBlockerKind, reason string, at time.Time) error {
+	data, err := json.Marshal(loginPark{Kind: kind, Reason: reason, ParkedAt: at})
+	if err != nil {
+		return err
+	}
+	return writeLoginParkFile(loginParkMarker(), data)
+}
+
+// clearLoginPark removes the marker; a missing marker is not an error.
+func clearLoginPark() {
+	if err := os.Remove(loginParkMarker()); err != nil && !errors.Is(err, os.ErrNotExist) {
+		logging.FromContext(context.Background()).Debug("clearing modelstudio login park failed", "err", err)
+	}
+}
+
+// loginGuidancePort names the headed-Chrome port an operator should sign in
+// on: login_port, else the first cdp_ports entry, else the literal setting
+// name so the message still tells them what to configure.
+func loginGuidancePort() string {
+	pc := config.Get().Providers["modelstudio"]
+	if pc.LoginPort > 0 {
+		if port := normalizeCDPPort(strconv.Itoa(pc.LoginPort)); port != "" {
+			return port
+		}
+	}
+	if ports, explicit := cdpFixedPorts(pc.CDPPorts); explicit && len(ports) > 0 {
+		return ports[0]
+	}
+	return "login_port"
+}
+
+// classWording is the operator-facing name of a blocker kind.
+func (k loginBlockerKind) classWording() string {
+	switch k {
+	case loginBlockerVerification:
+		return "Alibaba account verification (SMS / account-protection code)"
+	case loginBlockerCaptcha:
+		return "a slider captcha (Alibaba risk control)"
+	case loginBlockerPending:
+		return "an automatic sign-in attempt that did not finish (possible Alibaba blocker)"
+	default:
+		return "an Alibaba sign-in blocker"
+	}
+}
+
+// loginParkedError is returned instead of attempting a sign-in while parked.
+type loginParkedError struct {
+	Kind loginBlockerKind
+	Port string
+	// MarkerErr is set when converting the provisional guard into the real
+	// park failed; the provisional guard still keeps auto-login parked.
+	MarkerErr error
+}
+
+func (e *loginParkedError) Error() string {
+	msg := fmt.Sprintf("%s after %s: sign in manually at %s in the Chrome on port %s, then retry; it clears automatically once a signed-in session is imported or saved",
+		errAutoLoginParked.Error(), e.Kind.classWording(), modelStudioDashboardURL, e.Port)
+	if e.MarkerErr != nil {
+		msg += fmt.Sprintf(" (park marker update failed: %v; a provisional guard keeps auto-login parked)", e.MarkerErr)
+	}
+	return msg
+}
+
+func (e *loginParkedError) Unwrap() error { return errAutoLoginParked }
 
 // loadLoginCredentials runs the configured command and parses its output.
 // Accepted shapes: a JSON object with username/password (aliases: email,
@@ -249,6 +471,17 @@ func performModelStudioAutoLogin(ctx context.Context, port string, creds loginCr
 	for attempt := 1; attempt <= loginMaxAttempts; attempt++ {
 		formCtx, err := page.waitForFrameWorld(ctx, passportFrameHost, loginUsernameSel, loginFormWait)
 		if err != nil {
+			// The form never showed up. An interactive blocker (account
+			// verification page, TMD punish frame) can replace it before
+			// any credentials are typed; classify only now that the wait
+			// has failed so a normal sign-in page is never mistaken for one.
+			kind, reason := page.loginBlockerReason()
+			diag := page.failureDiagnostics()
+			logger.Debug("sign-in form did not appear", "elapsed", elapsed(), "err", err, "blocker", string(kind),
+				"url", diag.URL, "frames", diag.Frames, "form_text", diag.FormText, "screenshot", diag.Screenshot)
+			if kind != "" {
+				return browserSession{}, fmt.Errorf("sign-in form did not appear: %w", &loginBlockedError{Kind: kind, Reason: reason})
+			}
 			return browserSession{}, fmt.Errorf("sign-in form did not appear: %w", err)
 		}
 		if attempt == 1 {
@@ -512,7 +745,9 @@ func (c *cdpConn) waitForLoginOutcome(ctx context.Context, timeout time.Duration
 			}
 		}
 
-		if reason := c.loginBlockerReason(); reason != "" {
+		if kind, reason := c.loginBlockerReason(); kind != "" {
+			return &loginBlockedError{Kind: kind, Reason: reason}
+		} else if reason != "" {
 			return errors.New(reason)
 		}
 
@@ -561,42 +796,50 @@ func (c *cdpConn) captureSession(ctx context.Context, timeout time.Duration) (br
 	}
 }
 
-// loginBlockerReason inspects the passport frame for a visible captcha or
-// error message. It returns "" when nothing blocking is shown.
-func (c *cdpConn) loginBlockerReason() string {
+// loginPageTextExpr reads the top-level page's visible text. The marker
+// comment lets the test fake recognise it.
+const loginPageTextExpr = `(() => { /* vibeusage-page-text */ return (document.body && document.body.innerText || "").replace(/\s+/g, " ").trim().slice(0, 600); })()`
+
+// loginBlockerReason inspects the sign-in tab for an interactive blocker
+// (account verification or captcha) or a form error. It returns a zero
+// kind with an empty reason when nothing blocking is shown, and a zero kind
+// with a reason for a plain form error.
+func (c *cdpConn) loginBlockerReason() (loginBlockerKind, string) {
 	var tree struct {
 		FrameTree cdpFrameTree `json:"frameTree"`
 	}
 	if err := c.call("Page.getFrameTree", nil, &tree); err != nil {
-		return ""
+		return "", ""
 	}
-	if tree.FrameTree.any(func(f cdpFrame) bool { return strings.Contains(f.URL, loginCaptchaFramePath) }) {
-		return captchaBlockedReason
-	}
-	frame, ok := tree.FrameTree.find(passportFrameHost)
-	if !ok {
-		return ""
-	}
-	var world struct {
-		ExecutionContextID int `json:"executionContextId"`
-	}
-	if err := c.call("Page.createIsolatedWorld", map[string]any{"frameId": frame.ID, "worldName": "vibeusage"}, &world); err != nil {
-		return ""
-	}
-	expr := `(() => {
+	tmdFrame := tree.FrameTree.any(func(f cdpFrame) bool { return strings.Contains(f.URL, loginCaptchaFramePath) })
+
+	var signals loginBlockerSignals
+	if frame, ok := tree.FrameTree.find(passportFrameHost); ok {
+		var world struct {
+			ExecutionContextID int `json:"executionContextId"`
+		}
+		if err := c.call("Page.createIsolatedWorld", map[string]any{"frameId": frame.ID, "worldName": "vibeusage"}, &world); err == nil {
+			expr := `(() => { /* vibeusage-login-probe */
 		const visible = el => !!el && el.getClientRects().length > 0 && getComputedStyle(el).visibility !== "hidden";
 		const q = s => [...document.querySelectorAll(s)];
-		if (q(` + strconv.Quote(loginCaptchaSel) + `).some(visible)) return ` + strconv.Quote(captchaBlockedReason) + `;
-		if (visible(document.querySelector(` + strconv.Quote(loginCheckcodeSel) + `))) return "sign-in requires a verification code; sign in manually once in this browser";
 		const err = q(` + strconv.Quote(loginErrorSel) + `).filter(visible).map(e => e.textContent.trim()).filter(Boolean)[0];
-		if (err) return "sign-in rejected: " + err.slice(0, 120);
-		return "";
+		return {
+			checkcode: visible(document.querySelector(` + strconv.Quote(loginCheckcodeSel) + `)),
+			captcha: q(` + strconv.Quote(loginCaptchaSel) + `).some(visible),
+			text: (document.body && document.body.innerText || "").replace(/\s+/g, " ").trim().slice(0, 600),
+			err: err ? err.slice(0, 120) : ""
+		};
 	})()`
-	var reason string
-	if err := c.evalInContext(world.ExecutionContextID, expr, &reason); err != nil {
-		return ""
+			// A failed probe leaves the zero signals; the frame tree and
+			// top-level text can still classify the page.
+			_ = c.evalInContext(world.ExecutionContextID, expr, &signals)
+		}
 	}
-	return reason
+
+	var topText string
+	_ = c.evalInContext(0, loginPageTextExpr, &topText)
+
+	return classifyLoginBlocker(tmdFrame, signals, topText)
 }
 
 type loginDiagnostics struct {

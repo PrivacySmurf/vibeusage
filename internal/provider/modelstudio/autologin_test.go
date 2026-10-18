@@ -284,10 +284,113 @@ func TestPerformModelStudioAutoLoginDetectsCaptcha(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "slider captcha") {
 		t.Fatalf("expected captcha error, got %v", err)
 	}
+	var blocked *loginBlockedError
+	if !errors.As(err, &blocked) || blocked.Kind != loginBlockerCaptcha {
+		t.Errorf("expected captcha-kind *loginBlockedError, got %T %v", err, err)
+	}
 	chrome.mu.Lock()
 	defer chrome.mu.Unlock()
 	if chrome.closed != 1 {
 		t.Errorf("tab should be closed after failure, closed=%d", chrome.closed)
+	}
+}
+
+func TestPerformModelStudioAutoLoginDetectsVerification(t *testing.T) {
+	chrome := newFakeLoginChrome(t)
+	chrome.verification = true
+
+	_, err := performModelStudioAutoLogin(context.Background(), chrome.port, loginCredentials{Username: "me@example.com", Password: "s3cret"})
+	var blocked *loginBlockedError
+	if !errors.As(err, &blocked) {
+		t.Fatalf("expected *loginBlockedError, got %T %v", err, err)
+	}
+	if blocked.Kind != loginBlockerVerification {
+		t.Errorf("kind = %q, want verification", blocked.Kind)
+	}
+	if !strings.Contains(err.Error(), "account verification") || strings.Contains(err.Error(), "slider captcha") {
+		t.Errorf("verification reason mislabelled: %v", err)
+	}
+	chrome.mu.Lock()
+	defer chrome.mu.Unlock()
+	if chrome.closed != 1 {
+		t.Errorf("tab should be closed after failure, closed=%d", chrome.closed)
+	}
+}
+
+// TestPerformModelStudioAutoLoginVerificationBeatsCaptchaSignals reproduces
+// the incident: the SMS page also matched the captcha selector and was
+// labelled "slider captcha".
+func TestPerformModelStudioAutoLoginVerificationBeatsCaptchaSignals(t *testing.T) {
+	chrome := newFakeLoginChrome(t)
+	chrome.verification = true
+	chrome.captchaSel = true
+	chrome.captcha = true
+
+	_, err := performModelStudioAutoLogin(context.Background(), chrome.port, loginCredentials{Username: "me@example.com", Password: "s3cret"})
+	var blocked *loginBlockedError
+	if !errors.As(err, &blocked) || blocked.Kind != loginBlockerVerification {
+		t.Fatalf("expected verification blocker, got %v", err)
+	}
+	if strings.Contains(err.Error(), "slider captcha") {
+		t.Errorf("verification page reported as slider captcha: %v", err)
+	}
+}
+
+func TestClassifyLoginBlocker(t *testing.T) {
+	cases := []struct {
+		name     string
+		tmd      bool
+		passport loginBlockerSignals
+		topText  string
+		want     loginBlockerKind
+		wantErr  string
+	}{
+		{name: "verification text in passport frame", passport: loginBlockerSignals{Text: "To protect your account, please complete the verification"}, want: loginBlockerVerification},
+		{name: "verification text case-insensitive", passport: loginBlockerSignals{Text: "ACCOUNT PROTECTION"}, want: loginBlockerVerification},
+		{name: "identity verification text", passport: loginBlockerSignals{Text: "Identity verification required"}, want: loginBlockerVerification},
+		{name: "security verification text", passport: loginBlockerSignals{Text: "Security Verification"}, want: loginBlockerVerification},
+		{name: "verification text at top level", topText: "Please protect your account", want: loginBlockerVerification},
+		{name: "checkcode visible", passport: loginBlockerSignals{Checkcode: true}, want: loginBlockerVerification},
+		{name: "TMD punish frame", tmd: true, want: loginBlockerCaptcha},
+		{name: "captcha selector visible", passport: loginBlockerSignals{Captcha: true}, want: loginBlockerCaptcha},
+		{
+			name: "verification text + TMD frame + captcha selector is verification",
+			tmd:  true,
+			passport: loginBlockerSignals{
+				Captcha: true,
+				Text:    "To protect your account, please complete the verification",
+			},
+			want: loginBlockerVerification,
+		},
+		{name: "checkcode + TMD frame is verification", tmd: true, passport: loginBlockerSignals{Checkcode: true, Captcha: true}, want: loginBlockerVerification},
+		{name: "form error is untyped", passport: loginBlockerSignals{FormError: "Incorrect password"}, wantErr: "sign-in rejected: Incorrect password"},
+		{name: "captcha beats form error", tmd: true, passport: loginBlockerSignals{FormError: "x"}, want: loginBlockerCaptcha},
+		{name: "nothing shown"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			kind, reason := classifyLoginBlocker(tc.tmd, tc.passport, tc.topText)
+			if kind != tc.want {
+				t.Fatalf("kind = %q, want %q (reason %q)", kind, tc.want, reason)
+			}
+			switch tc.want {
+			case loginBlockerVerification:
+				if reason != verificationBlockedReason || strings.Contains(reason, "slider captcha") {
+					t.Errorf("verification reason = %q", reason)
+				}
+			case loginBlockerCaptcha:
+				if reason != captchaBlockedReason || !strings.Contains(reason, "slider captcha") {
+					t.Errorf("captcha reason = %q", reason)
+				}
+			default:
+				if reason != tc.wantErr {
+					t.Errorf("reason = %q, want %q", reason, tc.wantErr)
+				}
+			}
+		})
+	}
+	if !strings.Contains(verificationBlockedReason, "account verification") {
+		t.Errorf("verification reason lacks wording: %q", verificationBlockedReason)
 	}
 }
 
@@ -299,6 +402,7 @@ func useAutoLoginConfig(t *testing.T) {
 	cfg := config.DefaultConfig()
 	cfg.Providers["modelstudio"] = config.ProviderConfig{
 		CDPPorts:     []int{9444, 9222},
+		LoginPort:    9444,
 		LoginCommand: `printf '{"username":"me@example.com","password":"s3cret"}'`,
 	}
 	config.SetGlobal(cfg)
@@ -342,8 +446,19 @@ type fakeLoginChrome struct {
 	// state
 	submitted       bool
 	submits         int
-	captcha         bool
+	captcha         bool // TMD punish frame appears after submit
+	captchaSel      bool // a captcha-selector element is visible in the passport frame
+	verification    bool // Alibaba account-protection page (checkcode + protect-your-account text)
 	wipeFirstSubmit bool
+	// The page never shows the username form: it opens straight on a blocker.
+	initialVerification bool // account-protection page from the first poll, no form
+	initialTMD          bool // TMD punish frame in the tree from the first poll, no form
+	noForm              bool // the form never appears and nothing blocks
+}
+
+// blocked reports whether the sign-in page ends in an interactive blocker.
+func (f *fakeLoginChrome) blocked() bool {
+	return f.captcha || f.captchaSel || f.verification || f.initialVerification || f.initialTMD
 }
 
 func newFakeLoginChrome(t *testing.T) *fakeLoginChrome {
@@ -424,7 +539,7 @@ func (f *fakeLoginChrome) handle(method string, raw json.RawMessage) any {
 	case "Storage.getCookies":
 		// The session cookies land only after the sign-in succeeds.
 		cookies := []any{}
-		if f.submitted && !f.captcha {
+		if f.submitted && !f.blocked() {
 			for _, c := range signedInCDPCookies() {
 				cookies = append(cookies, map[string]any{
 					"name": c.Name, "value": c.Value, "domain": c.Domain, "path": c.Path, "secure": c.Secure, "expires": c.Expires,
@@ -438,6 +553,12 @@ func (f *fakeLoginChrome) handle(method string, raw json.RawMessage) any {
 		}
 		if f.captcha && f.submitted {
 			// The real page nests the slider captcha as a TMD "punish" frame.
+			passport["childFrames"] = []any{map[string]any{
+				"frame": map[string]string{"id": "punish", "url": "https://" + passportFrameHost + "/newlogin/login.do" + loginCaptchaFramePath + "?x5secdata=abc"},
+			}}
+		}
+		if f.initialTMD {
+			// The punish frame is there before any form: the TMD page took over.
 			passport["childFrames"] = []any{map[string]any{
 				"frame": map[string]string{"id": "punish", "url": "https://" + passportFrameHost + "/newlogin/login.do" + loginCaptchaFramePath + "?x5secdata=abc"},
 			}}
@@ -471,12 +592,14 @@ func (f *fakeLoginChrome) handle(method string, raw json.RawMessage) any {
 func (f *fakeLoginChrome) evaluate(expr string, contextID int) any {
 	switch {
 	case expr == "location.href":
-		if f.submitted && !f.captcha {
+		if f.submitted && !f.blocked() {
 			return modelStudioDashboardURL
 		}
 		return alibabaLoginURL
 	case strings.HasPrefix(expr, "document.readyState"):
-		return contextID == 7 // form only exists in the passport world
+		// The form only exists in the passport world, and not at all when
+		// the page opened on a blocker.
+		return contextID == 7 && !f.initialVerification && !f.initialTMD && !f.noForm
 	case strings.Contains(expr, "el.focus()"):
 		for _, sel := range []string{loginUsernameSel, loginPasswordSel} {
 			if strings.Contains(expr, sel) {
@@ -502,8 +625,22 @@ func (f *fakeLoginChrome) evaluate(expr string, contextID int) any {
 		}
 		f.submitted = true
 		return nil
-	case strings.Contains(expr, "slider captcha"):
-		return "" // DOM probe finds nothing; detection must come from the frame tree
+	case strings.Contains(expr, "vibeusage-login-probe"):
+		// The passport-frame probe returns raw signals; classification is
+		// the Go side's job. Nothing shows until the form was submitted.
+		signals := map[string]any{"checkcode": false, "captcha": false, "text": "", "err": ""}
+		if f.submitted || f.initialVerification {
+			if f.verification || f.initialVerification {
+				signals["checkcode"] = true
+				signals["text"] = "To protect your account, please complete the verification. Mobile 1-206****361 Get code"
+			}
+			if f.captchaSel {
+				signals["captcha"] = true
+			}
+		}
+		return signals
+	case strings.Contains(expr, "vibeusage-page-text"):
+		return "" // the top-level page shows no copy; the passport frame carries it
 	}
 	return nil
 }

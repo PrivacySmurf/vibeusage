@@ -210,7 +210,7 @@ func TestDiagnoseFullReport(t *testing.T) {
 	diags := (ModelStudio{}).DiagnoseAuth(context.Background())
 	for _, want := range []string{
 		"Environment cookie", "Stored session", "CDP :9499",
-		"Browser profiles", "Throttle",
+		"Browser profiles", "Throttle", "Auto-login",
 	} {
 		findDiag(t, diags, want)
 	}
