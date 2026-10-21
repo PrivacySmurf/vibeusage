@@ -140,6 +140,7 @@ func parseQuotaResponse(resp QuotaResponse) *models.UsageSnapshot {
 			PeriodType:  limit.PeriodType(),
 			ResetsAt:    limit.ResetTime(),
 		}
+		period.Used, period.Limit = limit.CreditTotals()
 		periods = append(periods, period)
 	}
 

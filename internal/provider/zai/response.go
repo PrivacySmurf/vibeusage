@@ -82,6 +82,9 @@ func (q QuotaLimit) ResetTime() *time.Time {
 // TOKENS_LIMIT hourly windows use "Session (Nh)" to match the convention used
 // by Claude and Antigravity. Other token periods fall back to a labelled quota.
 // TIME_LIMIT windows describe the tool quota period (e.g. "Monthly Tools").
+// CREDIT_LIMIT windows (credits-based plans) label the credit allowance of the
+// period (e.g. "Weekly Credits"), with hourly windows keeping the "Session (Nh)"
+// convention.
 func (q QuotaLimit) DisplayName() string {
 	switch q.Type {
 	case typeTokens:
@@ -91,9 +94,25 @@ func (q QuotaLimit) DisplayName() string {
 		return q.periodLabel("Quota")
 	case typeTime:
 		return q.periodLabel("Tools")
+	case typeCredits:
+		if q.Unit == unitHours {
+			return fmt.Sprintf("Session (%dh) Credits", q.Number)
+		}
+		return q.periodLabel("Credits")
 	default:
 		return q.Type
 	}
+}
+
+// CreditTotals returns the used/limit counts of a credits-based limit.
+// Usage is the window's credit allowance and CurrentValue the consumed share;
+// limits without an allowance report no totals.
+func (q QuotaLimit) CreditTotals() (used, limit *int) {
+	if q.Type != typeCredits || q.Usage <= 0 {
+		return nil, nil
+	}
+	u, l := q.CurrentValue, q.Usage
+	return &u, &l
 }
 
 // periodLabel builds a period-prefixed label such as "Monthly Tools" or "Daily Quota".
@@ -126,8 +145,9 @@ func (q QuotaLimit) periodLabel(suffix string) string {
 
 // Known limit types.
 const (
-	typeTokens = "TOKENS_LIMIT"
-	typeTime   = "TIME_LIMIT"
+	typeTokens  = "TOKENS_LIMIT"
+	typeTime    = "TIME_LIMIT"
+	typeCredits = "CREDIT_LIMIT"
 )
 
 // Known unit values.

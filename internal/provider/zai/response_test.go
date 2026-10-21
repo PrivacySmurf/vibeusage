@@ -262,6 +262,23 @@ func TestQuotaLimit_DisplayName(t *testing.T) {
 			q:    QuotaLimit{Type: "TIME_LIMIT", Unit: unitDays, Number: 1},
 			want: "Daily Tools",
 		},
+		// CREDIT_LIMIT: credits-based plans label the credit allowance,
+		// keeping the "Session (Nh)" convention for hourly windows.
+		{
+			name: "5 hour credit window",
+			q:    QuotaLimit{Type: "CREDIT_LIMIT", Unit: unitHours, Number: 5},
+			want: "Session (5h) Credits",
+		},
+		{
+			name: "weekly credit window",
+			q:    QuotaLimit{Type: "CREDIT_LIMIT", Unit: unitWeeks, Number: 1},
+			want: "Weekly Credits",
+		},
+		{
+			name: "monthly credit window",
+			q:    QuotaLimit{Type: "CREDIT_LIMIT", Unit: unitMonths, Number: 1},
+			want: "Monthly Credits",
+		},
 		// unknown type falls back to the raw type string
 		{
 			name: "unknown type",
@@ -275,6 +292,49 @@ func TestQuotaLimit_DisplayName(t *testing.T) {
 			got := tt.q.DisplayName()
 			if got != tt.want {
 				t.Errorf("DisplayName() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestQuotaLimit_CreditTotals(t *testing.T) {
+	tests := []struct {
+		name     string
+		q        QuotaLimit
+		wantUsed int
+		wantNil  bool
+	}{
+		{
+			name:     "credit limit with allowance",
+			q:        QuotaLimit{Type: "CREDIT_LIMIT", Usage: 140000, CurrentValue: 15},
+			wantUsed: 15,
+		},
+		{
+			name:    "credit limit without allowance",
+			q:       QuotaLimit{Type: "CREDIT_LIMIT", Usage: 0},
+			wantNil: true,
+		},
+		{
+			name:    "non-credit limit reports no totals",
+			q:       QuotaLimit{Type: "TIME_LIMIT", Usage: 1000, CurrentValue: 200},
+			wantNil: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			used, limit := tt.q.CreditTotals()
+			if tt.wantNil {
+				if used != nil || limit != nil {
+					t.Errorf("CreditTotals() = %v/%v, want nil/nil", used, limit)
+				}
+				return
+			}
+			if used == nil || *used != tt.wantUsed {
+				t.Errorf("used = %v, want %d", used, tt.wantUsed)
+			}
+			if limit == nil || *limit != tt.q.Usage {
+				t.Errorf("limit = %v, want %d", limit, tt.q.Usage)
 			}
 		})
 	}
@@ -377,6 +437,13 @@ func TestParseQuotaResponse_ProTier(t *testing.T) {
 	}
 	if tools.PeriodType != models.PeriodMonthly {
 		t.Errorf("periodType = %q, want %q", tools.PeriodType, models.PeriodMonthly)
+	}
+	// Legacy limit types keep percentage-based display: no used/limit totals.
+	if tools.Used != nil || tools.Limit != nil {
+		t.Errorf("tools Used/Limit = %v/%v, want nil/nil", tools.Used, tools.Limit)
+	}
+	if tokens.Used != nil || tokens.Limit != nil {
+		t.Errorf("tokens Used/Limit = %v/%v, want nil/nil", tokens.Used, tokens.Limit)
 	}
 }
 
