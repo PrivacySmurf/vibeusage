@@ -208,7 +208,8 @@ func TestParkNotClearedByCooldownExpiry(t *testing.T) {
 
 	// Both time brakes elapse: the login-attempt cooldown (backdated marker)
 	// and, by construction, the 30-minute session throttle (each Fetch here is
-	// a fresh process-equivalent call).
+	// a fresh process-equivalent call). The park TTL has not elapsed, so the
+	// park — not the cooldown — must still answer.
 	recordLoginAttempt(time.Now().Add(-loginCooldown - time.Minute))
 	for i := 0; i < 2; i++ {
 		msg, ok := rig.fetch()
@@ -223,6 +224,93 @@ func TestParkNotClearedByCooldownExpiry(t *testing.T) {
 	after, parked := loadLoginPark()
 	if !parked || !after.ParkedAt.Equal(before.ParkedAt) {
 		t.Errorf("park changed across cooldown expiry: before=%+v after=%+v parked=%v", before, after, parked)
+	}
+}
+
+func TestLoginParkExpiresAfterTTL(t *testing.T) {
+	isolateParkFixture(t)
+	if err := writeLoginPark(loginBlockerVerification, verificationBlockedReason, time.Now().Add(-loginParkTTL-time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if park, parked := loadLoginPark(); parked {
+		t.Fatalf("expired verification park still active: %+v", park)
+	}
+	if _, err := os.Stat(loginParkMarker()); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("expired park marker still on disk: %v", err)
+	}
+}
+
+func TestLoginParkPendingExpiresSoonerThanBlocker(t *testing.T) {
+	isolateParkFixture(t)
+	// Older than pending TTL but younger than the full blocker TTL: pending
+	// must clear while a verification park of the same age would still hold.
+	age := loginParkPendingTTL + time.Minute
+	if age >= loginParkTTL {
+		t.Fatalf("test ages need pending TTL (%s) < blocker TTL (%s)", loginParkPendingTTL, loginParkTTL)
+	}
+	if err := writeLoginPark(loginBlockerPending, pendingGuardReason, time.Now().Add(-age)); err != nil {
+		t.Fatal(err)
+	}
+	if _, parked := loadLoginPark(); parked {
+		t.Fatal("expired pending park still active")
+	}
+	if err := writeLoginPark(loginBlockerVerification, verificationBlockedReason, time.Now().Add(-age)); err != nil {
+		t.Fatal(err)
+	}
+	park, parked := loadLoginPark()
+	if !parked || park.Kind != loginBlockerVerification {
+		t.Fatalf("verification park of age %s should still hold: parked=%v park=%+v", age, parked, park)
+	}
+}
+
+func TestExpiredParkAllowsAutoLoginRetry(t *testing.T) {
+	rig := newParkRig(t, loginBlockerVerification)
+	if _, ok := rig.fetch(); ok {
+		t.Fatal("first fetch unexpectedly succeeded")
+	}
+	if rig.logins.Load() != 1 {
+		t.Fatalf("first fetch driver calls=%d, want 1", rig.logins.Load())
+	}
+
+	// Age the park past its TTL and clear the attempt cooldown so a retry is
+	// eligible. The second fetch must run login_command + driver again.
+	if err := writeLoginPark(loginBlockerVerification, verificationBlockedReason, time.Now().Add(-loginParkTTL-time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	recordLoginAttempt(time.Now().Add(-loginCooldown - time.Minute))
+
+	msg, ok := rig.fetch()
+	if ok {
+		t.Fatal("retry fetch unexpectedly succeeded against the blocker stub")
+	}
+	assertParkedMessage(t, loginBlockerVerification, msg)
+	if rig.logins.Load() != 2 || rig.commandRuns() != 2 {
+		t.Fatalf("after TTL expiry: driver calls=%d login_command runs=%d, want 2 and 2", rig.logins.Load(), rig.commandRuns())
+	}
+	park, parked := loadLoginPark()
+	if !parked || park.Kind != loginBlockerVerification {
+		t.Fatalf("retry should re-park on the same blocker: parked=%v park=%+v", parked, park)
+	}
+	if time.Since(park.ParkedAt) > time.Minute {
+		t.Errorf("re-parked marker should be fresh, parked_at=%s", park.ParkedAt)
+	}
+}
+
+func TestCorruptParkExpiresFromFileMtime(t *testing.T) {
+	isolateParkFixture(t)
+	if err := os.MkdirAll(filepath.Dir(loginParkMarker()), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := loginParkMarker()
+	if err := os.WriteFile(path, []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	past := time.Now().Add(-loginParkTTL - time.Minute)
+	if err := os.Chtimes(path, past, past); err != nil {
+		t.Fatal(err)
+	}
+	if park, parked := loadLoginPark(); parked {
+		t.Fatalf("expired corrupt park still active: %+v", park)
 	}
 }
 
@@ -1031,7 +1119,8 @@ func TestDiagnoseAutoLoginParked(t *testing.T) {
 				modelStudioDashboardURL,
 				"9444",
 				wantParkedWording(kind),
-				"clears automatically once a signed-in session is imported or saved",
+				"clears once a signed-in session is imported or saved",
+				"park TTL",
 				"modelstudio-login-park.json",
 				parkedAt.Format(time.RFC3339),
 			} {

@@ -53,6 +53,16 @@ const (
 	// whatever their outcome. Repeated logins are what trip Alibaba's risk
 	// control (slider captcha), so a broken flow must fail quietly, not loop.
 	loginCooldown = 10 * time.Minute
+	// loginParkTTL is how long a verification/captcha/unknown park blocks
+	// automatic sign-in. Alibaba's interactive challenge is often temporary;
+	// a permanent park left today's session stale for hours after a one-time
+	// SMS wall, even though a later password fill succeeded without SMS.
+	// The 10-minute loginCooldown still spaces retries after the park expires.
+	loginParkTTL = 4 * time.Hour
+	// loginParkPendingTTL is how long a provisional "did not finish" guard
+	// blocks automatic sign-in after a crash or kill mid-attempt. Shorter than
+	// loginParkTTL so a dead process cannot strand the park all day.
+	loginParkPendingTTL = 30 * time.Minute
 )
 
 // Tunable so tests can run the retry path quickly.
@@ -214,10 +224,11 @@ func classifyLoginBlocker(tmdFrame bool, passport loginBlockerSignals, topText s
 }
 
 // The park marker survives across processes (each poll is a new process).
-// While it exists, automatic sign-in is refused outright: repeating scripted
-// password logins against an interactive blocker only feeds Alibaba's risk
-// control. It is cleared only when a usable session is obtained some other
-// way (see clearLoginPark callers), never by a cooldown expiring.
+// While it is younger than its TTL, automatic sign-in is refused outright:
+// repeating scripted password logins against an interactive blocker only
+// feeds Alibaba's risk control. A usable session still clears it immediately
+// (see clearLoginPark callers). The attempt cooldown alone never clears it;
+// only a successful session or the park TTL does.
 func loginParkMarker() string {
 	return filepath.Join(config.ThrottlesDir(), "modelstudio-login-park.json")
 }
@@ -228,11 +239,22 @@ type loginPark struct {
 	ParkedAt time.Time        `json:"parked_at"`
 }
 
+// loginParkMaxAge is how long a park of the given kind stays in force.
+func loginParkMaxAge(kind loginBlockerKind) time.Duration {
+	if kind == loginBlockerPending {
+		return loginParkPendingTTL
+	}
+	return loginParkTTL
+}
+
 // loadLoginPark reports whether auto-login is parked. A marker that exists
 // but cannot be read or parsed still counts as parked (kind "unknown"): the
-// brake must fail closed.
+// brake must fail closed while it is younger than the park TTL. Once the TTL
+// elapses the marker is removed so automatic sign-in can try again (still
+// subject to loginCooldown).
 func loadLoginPark() (loginPark, bool) {
-	data, err := os.ReadFile(loginParkMarker())
+	path := loginParkMarker()
+	data, err := os.ReadFile(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return loginPark{}, false
@@ -241,10 +263,26 @@ func loadLoginPark() (loginPark, bool) {
 	}
 	var park loginPark
 	if err := json.Unmarshal(data, &park); err != nil {
-		return loginPark{Kind: loginBlockerUnknown, Reason: "park marker unparseable"}, true
+		// Corrupt markers still park, aged from the file mtime so a stuck
+		// unreadable file cannot block forever past the TTL.
+		park = loginPark{Kind: loginBlockerUnknown, Reason: "park marker unparseable"}
+		if info, statErr := os.Stat(path); statErr == nil {
+			park.ParkedAt = info.ModTime()
+		}
 	}
 	if park.Kind == "" {
 		park.Kind = loginBlockerUnknown
+	}
+	ageAt := park.ParkedAt
+	if ageAt.IsZero() {
+		if info, statErr := os.Stat(path); statErr == nil {
+			ageAt = info.ModTime()
+			park.ParkedAt = ageAt
+		}
+	}
+	if !ageAt.IsZero() && time.Since(ageAt) >= loginParkMaxAge(park.Kind) {
+		clearLoginPark()
+		return loginPark{}, false
 	}
 	return park, true
 }

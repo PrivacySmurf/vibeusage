@@ -295,11 +295,17 @@ func diagnoseModelStudioAutoLogin() provider.Diagnostic {
 			detail += fmt.Sprintf(" (marker: %s)", park.Reason)
 		}
 		if !park.ParkedAt.IsZero() {
-			detail += fmt.Sprintf("; parked since %s (%s ago)",
-				park.ParkedAt.Format(time.RFC3339), time.Since(park.ParkedAt).Round(time.Second))
+			ttl := loginParkMaxAge(park.Kind)
+			remaining := ttl - time.Since(park.ParkedAt)
+			if remaining < 0 {
+				remaining = 0
+			}
+			detail += fmt.Sprintf("; parked since %s (%s ago); auto-login may retry after the park TTL (%s, ~%s left)",
+				park.ParkedAt.Format(time.RFC3339), time.Since(park.ParkedAt).Round(time.Second),
+				ttl.Round(time.Minute), remaining.Round(time.Minute))
 		}
 		detail += fmt.Sprintf("; sign in manually at %s in the Chrome on port %s; "+
-			"the park clears automatically once a signed-in session is imported or saved "+
+			"the park also clears once a signed-in session is imported or saved "+
 			"(escape hatch: delete %s)",
 			modelStudioDashboardURL, loginGuidancePort(), loginParkMarker())
 		return provider.Diagnostic{Name: name, Status: provider.DiagWarn, Detail: detail}
