@@ -3,7 +3,9 @@ package modelstudio
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -16,6 +18,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/charmbracelet/log"
 	"github.com/joshuadavidthomas/vibeusage/internal/config"
 	"github.com/joshuadavidthomas/vibeusage/internal/logging"
 )
@@ -52,7 +55,15 @@ const (
 	loginPollInterval         = 500 * time.Millisecond
 	loginCommandTimeout       = 30 * time.Second
 	loginOverallDeadline      = 90 * time.Second
-	loginDiagnosticsHeadroom  = 2 * time.Second
+	// loginFillSubmitTimeout bounds one credential fill+submit pass so humanized
+	// per-character typing and trusted mouse clicks fit comfortably inside
+	// loginOverallDeadline without extending WebConsoleStrategy.ExtendTimeout.
+	loginFillSubmitTimeout = 30 * time.Second
+	// loginKeyDelayMin and loginKeyDelayMax bound the humanized inter-key pacing
+	// delay drawn before each character typed into the sign-in form.
+	loginKeyDelayMin         = 80 * time.Millisecond
+	loginKeyDelayMax         = 200 * time.Millisecond
+	loginDiagnosticsHeadroom = 2 * time.Second
 	// loginCooldown is the minimum gap between automatic sign-in attempts,
 	// whatever their outcome. Repeated logins are what trip Alibaba's risk
 	// control (slider captcha), so a broken flow must fail quietly, not loop.
@@ -76,7 +87,39 @@ var (
 	loginRedirectWait     = 15 * time.Second
 	loginCookieWait       = 15 * time.Second
 	loginVerificationWait = loginOverallDeadline
+	loginSleep            = func(ctx context.Context, d time.Duration) error {
+		if d <= 0 {
+			return ctx.Err()
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(d):
+			return nil
+		}
+	}
+	loginKeyDelay = defaultLoginKeyDelay
 )
+
+func defaultLoginKeyDelay() time.Duration {
+	span := int64(loginKeyDelayMax - loginKeyDelayMin)
+	if span <= 0 {
+		return loginKeyDelayMin
+	}
+	var b [8]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return loginKeyDelayMin
+	}
+	jitter := int64(binary.LittleEndian.Uint64(b[:]) % uint64(span+1))
+	d := loginKeyDelayMin + time.Duration(jitter)
+	if d < loginKeyDelayMin {
+		return loginKeyDelayMin
+	}
+	if d > loginKeyDelayMax {
+		return loginKeyDelayMax
+	}
+	return d
+}
 
 var (
 	errAutoLoginUnavailable = errors.New("automatic sign-in not configured")
@@ -636,6 +679,7 @@ func performModelStudioAutoLogin(ctx context.Context, port string, creds loginCr
 		return browserSession{}, fmt.Errorf("attach to sign-in tab: %w", err)
 	}
 	defer page.Close()
+	page.rememberSecret(creds.Username)
 	page.rememberSecret(creds.Password)
 	defer func() {
 		if err != nil {
@@ -693,7 +737,7 @@ func performModelStudioAutoLogin(ctx context.Context, port string, creds loginCr
 			logger.Debug("sign-in form ready", "elapsed", elapsed())
 		}
 
-		if err := page.fillAndSubmit(formCtx, creds); err != nil {
+		if err := page.fillAndSubmit(ctx, logger, formCtx, creds); err != nil {
 			// A stale execution context means the frame reloaded under us;
 			// just go around and re-acquire it.
 			lastErr = err
@@ -748,27 +792,79 @@ func performModelStudioAutoLogin(ctx context.Context, port string, creds loginCr
 	return browserSession{}, lastErr
 }
 
-// fillAndSubmit types both credentials, confirms the form still holds them,
-// and clicks submit.
-func (c *cdpConn) fillAndSubmit(formCtx int, creds loginCredentials) error {
-	if err := c.typeInto(formCtx, loginUsernameSel, creds.Username); err != nil {
+type loginDeadlineContext struct {
+	context.Context
+	deadline time.Time
+}
+
+func (c *loginDeadlineContext) Deadline() (time.Time, bool) {
+	return c.deadline, true
+}
+
+func (c *loginDeadlineContext) Err() error {
+	if err := c.Context.Err(); err != nil {
+		return err
+	}
+	if !modelStudioNow().Before(c.deadline) {
+		return context.DeadlineExceeded
+	}
+	return nil
+}
+
+func withLoginTimeout(parent context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
+	now := modelStudioNow()
+	deadline := now.Add(timeout)
+	if pd, ok := parent.Deadline(); ok && pd.Before(deadline) {
+		deadline = pd
+	}
+	baseCtx, cancel := context.WithTimeout(parent, timeout)
+	return &loginDeadlineContext{
+		Context:  baseCtx,
+		deadline: deadline,
+	}, cancel
+}
+
+// fillAndSubmit types both credentials using humanized keyboard events,
+// confirms the form still holds them, and submits via a trusted mouse click.
+func (c *cdpConn) fillAndSubmit(ctx context.Context, logger *log.Logger, formCtx int, creds loginCredentials) error {
+	c.rememberSecret(creds.Username)
+	c.rememberSecret(creds.Password)
+	restoreDeadline := c.baseDeadline
+	if dl, ok := ctx.Deadline(); ok {
+		if restoreDeadline.IsZero() || dl.Before(restoreDeadline) {
+			restoreDeadline = dl
+		}
+	}
+	fillCtx, cancel := withLoginTimeout(ctx, loginFillSubmitTimeout)
+	defer cancel()
+
+	if err := c.typeCredentialInto(fillCtx, logger, formCtx, loginUsernameSel, creds.Username); err != nil {
 		return fmt.Errorf("enter username: %w", err)
 	}
-	if err := c.typeInto(formCtx, loginPasswordSel, creds.Password); err != nil {
+	if err := c.typeCredentialInto(fillCtx, logger, formCtx, loginPasswordSel, creds.Password); err != nil {
 		return fmt.Errorf("enter password: %w", err)
 	}
 	// Re-read both just before submitting: the page may have reset the form
 	// between the two inserts.
 	for _, field := range []struct{ sel, want string }{{loginUsernameSel, creds.Username}, {loginPasswordSel, creds.Password}} {
 		var value string
-		if err := c.evalInContext(formCtx, "document.querySelector("+strconv.Quote(field.sel)+").value", &value); err != nil {
+		if err := c.evalInContextWith(fillCtx, formCtx, "document.querySelector("+strconv.Quote(field.sel)+").value", &value); err != nil {
 			return err
 		}
 		if value != field.want {
 			return fmt.Errorf("%s was cleared before submit", field.sel)
 		}
 	}
-	return c.evalInContext(formCtx, "document.querySelector("+strconv.Quote(loginSubmitSel)+").click()", nil)
+	if err := fillCtx.Err(); err != nil {
+		return err
+	}
+	if err := c.clickSubmit(fillCtx, formCtx, loginSubmitSel); err != nil {
+		return err
+	}
+	if !c.ioBroken && !restoreDeadline.IsZero() {
+		_ = c.conn.SetDeadline(restoreDeadline)
+	}
+	return nil
 }
 
 type cdpTarget struct {
@@ -902,6 +998,10 @@ func (c *cdpConn) waitForFrameWorld(ctx context.Context, frameHost, selector str
 // evalInContext runs expression in executionContextId (0 = page default)
 // and decodes its by-value result into out.
 func (c *cdpConn) evalInContext(contextID int, expression string, out any) error {
+	return c.evalInContextWith(context.Background(), contextID, expression, out)
+}
+
+func (c *cdpConn) evalInContextWith(ctx context.Context, contextID int, expression string, out any) error {
 	params := map[string]any{
 		"expression":    expression,
 		"returnByValue": true,
@@ -918,7 +1018,7 @@ func (c *cdpConn) evalInContext(contextID int, expression string, out any) error
 			Text string `json:"text"`
 		} `json:"exceptionDetails"`
 	}
-	if err := c.call("Runtime.evaluate", params, &res); err != nil {
+	if err := c.callContext(ctx, "Runtime.evaluate", params, &res); err != nil {
 		return err
 	}
 	if res.ExceptionDetails != nil {
@@ -930,22 +1030,289 @@ func (c *cdpConn) evalInContext(contextID int, expression string, out any) error
 	return json.Unmarshal(res.Result.Value, out)
 }
 
-// typeInto focuses selector inside contextID and inserts text as keyboard
-// input, then verifies the field holds it.
-func (c *cdpConn) typeInto(contextID int, selector, text string) error {
-	focus := "(() => { const el = document.querySelector(" + strconv.Quote(selector) + "); if (!el) return false; el.focus(); el.select && el.select(); return document.activeElement === el; })()"
+// elementViewportCenter returns the top-level viewport center coordinates for
+// selector inside formCtx. When formCtx is a nested iframe context, it adds the
+// passport iframe's top-level offset so Input.dispatchMouseEvent lands on the
+// element inside the iframe.
+func (c *cdpConn) elementViewportCenter(ctx context.Context, formCtx int, selector string) (x, y float64, ok bool, err error) {
+	expr := `/* vibeusage-element-rect */ (() => {
+		const el = document.querySelector(` + strconv.Quote(selector) + `);
+		if (!el || typeof el.getBoundingClientRect !== "function") return {x: 0, y: 0, ok: false};
+		if (typeof el.scrollIntoView === "function") {
+			el.scrollIntoView({block: "center", inline: "center", behavior: "instant"});
+		}
+		const r = el.getBoundingClientRect();
+		if (!r || !(r.width > 0 && r.height > 0)) return {x: 0, y: 0, ok: false};
+		return {x: r.left + r.width / 2, y: r.top + r.height / 2, ok: true};
+	})()`
+	var rect struct {
+		X  float64 `json:"x"`
+		Y  float64 `json:"y"`
+		OK bool    `json:"ok"`
+	}
+	if err := c.evalInContextWith(ctx, formCtx, expr, &rect); err != nil {
+		return 0, 0, false, err
+	}
+	if !rect.OK {
+		return 0, 0, false, nil
+	}
+	if formCtx != 0 {
+		frameOffsetExpr := `/* vibeusage-frame-offset */ (() => {
+			const f = [...document.querySelectorAll("iframe")].find(el => (el.src || "").includes("passport.alibabacloud.com")) || document.querySelector("iframe");
+			if (!f || typeof f.getBoundingClientRect !== "function") return {x: 0, y: 0};
+			const r = f.getBoundingClientRect();
+			return {x: r ? r.left : 0, y: r ? r.top : 0};
+		})()`
+		var offset struct {
+			X float64 `json:"x"`
+			Y float64 `json:"y"`
+		}
+		if err := c.evalInContextWith(ctx, 0, frameOffsetExpr, &offset); err == nil {
+			rect.X += offset.X
+			rect.Y += offset.Y
+		} else if ctx.Err() != nil || c.ioBroken {
+			return 0, 0, false, err
+		}
+	}
+	return rect.X, rect.Y, true, nil
+}
+
+// trustedMouseClick dispatches a trusted mouse move + press + release sequence
+// at the given top-level viewport coordinates.
+func (c *cdpConn) trustedMouseClick(ctx context.Context, x, y float64) error {
+	events := []map[string]any{
+		{
+			"type":    "mouseMoved",
+			"x":       x,
+			"y":       y,
+			"button":  "none",
+			"buttons": 0,
+		},
+		{
+			"type":       "mousePressed",
+			"x":          x,
+			"y":          y,
+			"button":     "left",
+			"buttons":    1,
+			"clickCount": 1,
+		},
+		{
+			"type":       "mouseReleased",
+			"x":          x,
+			"y":          y,
+			"button":     "left",
+			"buttons":    0,
+			"clickCount": 1,
+		},
+	}
+	for _, ev := range events {
+		if err := c.callContext(ctx, "Input.dispatchMouseEvent", ev, nil); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// focusField focuses selector via a trusted mouse click at its viewport center,
+// falling back to JS el.focus() only if element coordinates are unavailable.
+func (c *cdpConn) focusField(ctx context.Context, logger *log.Logger, formCtx int, selector string) error {
+	x, y, ok, err := c.elementViewportCenter(ctx, formCtx, selector)
+	if err != nil && (ctx.Err() != nil || c.ioBroken) {
+		return err
+	}
+	if err == nil && ok {
+		if err := c.trustedMouseClick(ctx, x, y); err != nil {
+			return err
+		}
+		clearExpr := "/* vibeusage-clear-field */ (() => { const el = document.querySelector(" + strconv.Quote(selector) + "); if (!el) return false; el.value = \"\"; return true; })()"
+		var cleared bool
+		if err := c.evalInContextWith(ctx, formCtx, clearExpr, &cleared); err != nil && (ctx.Err() != nil || c.ioBroken) {
+			return err
+		}
+		return nil
+	}
+	if logger != nil {
+		logger.Debug("field coordinates unavailable; falling back to JS focus", "selector", selector)
+	}
+	focus := "/* vibeusage-js-focus */ (() => { const el = document.querySelector(" + strconv.Quote(selector) + "); if (!el) return false; el.focus(); el.select && el.select(); el.value = \"\"; return document.activeElement === el; })()"
 	var focused bool
-	if err := c.evalInContext(contextID, focus, &focused); err != nil {
+	if err := c.evalInContextWith(ctx, formCtx, focus, &focused); err != nil {
 		return err
 	}
 	if !focused {
 		return fmt.Errorf("could not focus %s", selector)
 	}
-	if err := c.call("Input.insertText", map[string]any{"text": text}, nil); err != nil {
+	return nil
+}
+
+// clickSubmit clicks the submit button using a trusted mouse interaction at its
+// viewport coordinates. It never calls JS .click() on the submit selector.
+func (c *cdpConn) clickSubmit(ctx context.Context, formCtx int, selector string) error {
+	x, y, ok, err := c.elementViewportCenter(ctx, formCtx, selector)
+	if err != nil {
 		return err
 	}
+	if !ok {
+		return fmt.Errorf("could not locate %s", selector)
+	}
+	return c.trustedMouseClick(ctx, x, y)
+}
+
+type keyDescriptor struct {
+	key       string
+	code      string
+	keyCode   int
+	modifiers int
+}
+
+func describeUSKey(r rune) keyDescriptor {
+	switch {
+	case r >= 'a' && r <= 'z':
+		upper := rune(r - 'a' + 'A')
+		return keyDescriptor{key: string(r), code: "Key" + string(upper), keyCode: int(upper)}
+	case r >= 'A' && r <= 'Z':
+		return keyDescriptor{key: string(r), code: "Key" + string(r), keyCode: int(r), modifiers: 8}
+	case r >= '0' && r <= '9':
+		return keyDescriptor{key: string(r), code: "Digit" + string(r), keyCode: int(r)}
+	}
+	switch r {
+	case '!':
+		return keyDescriptor{key: "!", code: "Digit1", keyCode: '1', modifiers: 8}
+	case '@':
+		return keyDescriptor{key: "@", code: "Digit2", keyCode: '2', modifiers: 8}
+	case '#':
+		return keyDescriptor{key: "#", code: "Digit3", keyCode: '3', modifiers: 8}
+	case '$':
+		return keyDescriptor{key: "$", code: "Digit4", keyCode: '4', modifiers: 8}
+	case '%':
+		return keyDescriptor{key: "%", code: "Digit5", keyCode: '5', modifiers: 8}
+	case '^':
+		return keyDescriptor{key: "^", code: "Digit6", keyCode: '6', modifiers: 8}
+	case '&':
+		return keyDescriptor{key: "&", code: "Digit7", keyCode: '7', modifiers: 8}
+	case '*':
+		return keyDescriptor{key: "*", code: "Digit8", keyCode: '8', modifiers: 8}
+	case '(':
+		return keyDescriptor{key: "(", code: "Digit9", keyCode: '9', modifiers: 8}
+	case ')':
+		return keyDescriptor{key: ")", code: "Digit0", keyCode: '0', modifiers: 8}
+	case '-':
+		return keyDescriptor{key: "-", code: "Minus", keyCode: 189}
+	case '_':
+		return keyDescriptor{key: "_", code: "Minus", keyCode: 189, modifiers: 8}
+	case '=':
+		return keyDescriptor{key: "=", code: "Equal", keyCode: 187}
+	case '+':
+		return keyDescriptor{key: "+", code: "Equal", keyCode: 187, modifiers: 8}
+	case '.':
+		return keyDescriptor{key: ".", code: "Period", keyCode: 190}
+	case ',':
+		return keyDescriptor{key: ",", code: "Comma", keyCode: 188}
+	case '/':
+		return keyDescriptor{key: "/", code: "Slash", keyCode: 191}
+	case '?':
+		return keyDescriptor{key: "?", code: "Slash", keyCode: 191, modifiers: 8}
+	case ';':
+		return keyDescriptor{key: ";", code: "Semicolon", keyCode: 186}
+	case ':':
+		return keyDescriptor{key: ":", code: "Semicolon", keyCode: 186, modifiers: 8}
+	case '\'':
+		return keyDescriptor{key: "'", code: "Quote", keyCode: 222}
+	case '"':
+		return keyDescriptor{key: "\"", code: "Quote", keyCode: 222, modifiers: 8}
+	case '[':
+		return keyDescriptor{key: "[", code: "BracketLeft", keyCode: 219}
+	case '{':
+		return keyDescriptor{key: "{", code: "BracketLeft", keyCode: 219, modifiers: 8}
+	case ']':
+		return keyDescriptor{key: "]", code: "BracketRight", keyCode: 221}
+	case '}':
+		return keyDescriptor{key: "}", code: "BracketRight", keyCode: 221, modifiers: 8}
+	case '\\':
+		return keyDescriptor{key: "\\", code: "Backslash", keyCode: 220}
+	case '|':
+		return keyDescriptor{key: "|", code: "Backslash", keyCode: 220, modifiers: 8}
+	case '`':
+		return keyDescriptor{key: "`", code: "Backquote", keyCode: 192}
+	case '~':
+		return keyDescriptor{key: "~", code: "Backquote", keyCode: 192, modifiers: 8}
+	case ' ':
+		return keyDescriptor{key: " ", code: "Space", keyCode: 32}
+	default:
+		return keyDescriptor{key: string(r)}
+	}
+}
+
+func (c *cdpConn) dispatchCharKeyEvents(ctx context.Context, selector string, r rune) error {
+	ch := string(r)
+	desc := describeUSKey(r)
+	down := map[string]any{
+		"type":                  "rawKeyDown",
+		"key":                   desc.key,
+		"code":                  desc.code,
+		"windowsVirtualKeyCode": desc.keyCode,
+		"nativeVirtualKeyCode":  desc.keyCode,
+		"modifiers":             desc.modifiers,
+	}
+	charEv := map[string]any{
+		"type":                  "char",
+		"key":                   desc.key,
+		"code":                  desc.code,
+		"windowsVirtualKeyCode": desc.keyCode,
+		"nativeVirtualKeyCode":  desc.keyCode,
+		"modifiers":             desc.modifiers,
+		"text":                  ch,
+		"unmodifiedText":        ch,
+	}
+	up := map[string]any{
+		"type":                  "keyUp",
+		"key":                   desc.key,
+		"code":                  desc.code,
+		"windowsVirtualKeyCode": desc.keyCode,
+		"nativeVirtualKeyCode":  desc.keyCode,
+		"modifiers":             desc.modifiers,
+	}
+	for _, ev := range []map[string]any{down, charEv, up} {
+		if err := c.callContext(ctx, "Input.dispatchKeyEvent", ev, nil); err != nil {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return ctxErr
+			}
+			if errors.Is(err, context.Canceled) {
+				return context.Canceled
+			}
+			if errors.Is(err, context.DeadlineExceeded) {
+				return context.DeadlineExceeded
+			}
+			if selector != "" {
+				return fmt.Errorf("dispatch key event on %s", selector)
+			}
+			return errors.New("dispatch key event")
+		}
+	}
+	return nil
+}
+
+// typeCredentialInto focuses selector via trusted mouse click (with JS fallback)
+// and types text one rune at a time using Input.dispatchKeyEvent with humanized
+// inter-key delays. It never logs key payloads or includes text in errors.
+func (c *cdpConn) typeCredentialInto(ctx context.Context, logger *log.Logger, formCtx int, selector, text string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := c.focusField(ctx, logger, formCtx, selector); err != nil {
+		return err
+	}
+	for _, r := range text {
+		delay := loginKeyDelay()
+		if err := loginSleep(ctx, delay); err != nil {
+			return err
+		}
+		if err := c.dispatchCharKeyEvents(ctx, selector, r); err != nil {
+			return err
+		}
+	}
 	var value string
-	if err := c.evalInContext(contextID, "document.querySelector("+strconv.Quote(selector)+").value", &value); err != nil {
+	if err := c.evalInContextWith(ctx, formCtx, "document.querySelector("+strconv.Quote(selector)+").value", &value); err != nil {
 		return err
 	}
 	if value != text {
@@ -1042,10 +1409,14 @@ const loginClickGetCodeExpr = `(() => { /* vibeusage-click-get-code */
 })()`
 
 func (c *cdpConn) passportWorld() (int, error) {
+	return c.passportWorldContext(context.Background())
+}
+
+func (c *cdpConn) passportWorldContext(ctx context.Context) (int, error) {
 	var tree struct {
 		FrameTree cdpFrameTree `json:"frameTree"`
 	}
-	if err := c.call("Page.getFrameTree", nil, &tree); err != nil {
+	if err := c.callContext(ctx, "Page.getFrameTree", nil, &tree); err != nil {
 		return 0, err
 	}
 	frame, ok := tree.FrameTree.find(passportFrameHost)
@@ -1055,7 +1426,7 @@ func (c *cdpConn) passportWorld() (int, error) {
 	var world struct {
 		ExecutionContextID int `json:"executionContextId"`
 	}
-	if err := c.call("Page.createIsolatedWorld", map[string]any{"frameId": frame.ID, "worldName": "vibeusage"}, &world); err != nil {
+	if err := c.callContext(ctx, "Page.createIsolatedWorld", map[string]any{"frameId": frame.ID, "worldName": "vibeusage"}, &world); err != nil {
 		return 0, err
 	}
 	return world.ExecutionContextID, nil
@@ -1152,7 +1523,7 @@ func (c *cdpConn) completeAssistedVerification(ctx context.Context, elapsed func
 					Reason: verificationBlockedReason,
 				}
 			}
-			if err := c.submitVerificationCode(code); err != nil {
+			if err := c.submitVerificationCode(waitCtx, logger, code); err != nil {
 				return browserSession{}, &loginBlockedError{
 					Kind:   loginBlockerVerification,
 					Reason: fmt.Sprintf("%s (%s)", verificationBlockedReason, c.redactSecrets(err.Error())),
@@ -1185,16 +1556,31 @@ func (c *cdpConn) completeAssistedVerification(ctx context.Context, elapsed func
 	}
 }
 
-func (c *cdpConn) submitVerificationCode(code string) error {
+func (c *cdpConn) submitVerificationCode(ctx context.Context, logger *log.Logger, code string) error {
 	c.rememberSecret(code)
-	worldID, err := c.passportWorld()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	worldID, err := c.passportWorldContext(ctx)
 	if err != nil {
 		return err
 	}
-	if err := c.typeInto(worldID, loginCheckcodeSel, code); err != nil {
+	if err := c.focusField(ctx, logger, worldID, loginCheckcodeSel); err != nil {
 		return fmt.Errorf("enter verification code: %w", err)
 	}
-	return c.evalInContext(worldID, "document.querySelector("+strconv.Quote(loginSubmitSel)+").click()", nil)
+	for _, r := range code {
+		if err := c.dispatchCharKeyEvents(ctx, loginCheckcodeSel, r); err != nil {
+			return fmt.Errorf("enter verification code: %w", err)
+		}
+	}
+	var value string
+	if err := c.evalInContextWith(ctx, worldID, "document.querySelector("+strconv.Quote(loginCheckcodeSel)+").value", &value); err != nil {
+		return fmt.Errorf("enter verification code: %w", err)
+	}
+	if value != code {
+		return fmt.Errorf("enter verification code: %s did not accept input", loginCheckcodeSel)
+	}
+	return c.clickSubmit(ctx, worldID, loginSubmitSel)
 }
 
 func (c *cdpConn) waitForVerificationOutcome(ctx context.Context, timeout time.Duration) error {

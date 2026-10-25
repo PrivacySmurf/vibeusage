@@ -447,6 +447,26 @@ func newTestStrategy(serverURL string) *WebConsoleStrategy {
 	}
 }
 
+type fakeMouseEvent struct {
+	Type       string  `json:"type"`
+	X          float64 `json:"x"`
+	Y          float64 `json:"y"`
+	Button     string  `json:"button"`
+	Buttons    int     `json:"buttons"`
+	ClickCount int     `json:"clickCount"`
+}
+
+type fakeKeyEvent struct {
+	Type                  string `json:"type"`
+	Key                   string `json:"key"`
+	Code                  string `json:"code"`
+	Text                  string `json:"text"`
+	UnmodifiedText        string `json:"unmodifiedText"`
+	Modifiers             int    `json:"modifiers"`
+	WindowsVirtualKeyCode int    `json:"windowsVirtualKeyCode"`
+	NativeVirtualKeyCode  int    `json:"nativeVirtualKeyCode"`
+}
+
 // fakeLoginChrome emulates the subset of DevTools the auto-login uses. It
 // starts on the sign-in page with a passport iframe and "redirects" to the
 // console once the submit button has been clicked.
@@ -478,6 +498,21 @@ type fakeLoginChrome struct {
 	onBlockerProbe       func()
 	onPassportWorld      func()
 	storageGetCookiesErr error
+	// Humanized input tracking & test hooks
+	mouseEvents       []fakeMouseEvent
+	keyEvents         []fakeKeyEvent
+	insertTextCalls   int
+	ignoreKeyDownText bool
+	jsSubmitClicks    int
+	missingCoords     map[string]bool
+	rejectFieldInput  map[string]bool
+	clearBeforeSubmit map[string]bool
+	lastMouseMovedX   float64
+	lastMouseMovedY   float64
+	hasMouseMoved     bool
+	lastMousePressedX float64
+	lastMousePressedY float64
+	hasMousePressed   bool
 }
 
 // blocked reports whether the sign-in page ends in an interactive blocker.
@@ -492,10 +527,11 @@ func newFakeLoginChrome(t *testing.T) *fakeLoginChrome {
 	if os.Getenv("VIBEUSAGE_CACHE_DIR") == "" {
 		t.Setenv("VIBEUSAGE_CACHE_DIR", t.TempDir())
 	}
-	oldSettle, oldRedirect, oldCookieWait, oldVerifyWait := loginFormSettle, loginRedirectWait, loginCookieWait, loginVerificationWait
+	oldSettle, oldRedirect, oldCookieWait, oldVerifyWait, oldSleep := loginFormSettle, loginRedirectWait, loginCookieWait, loginVerificationWait, loginSleep
 	loginFormSettle, loginRedirectWait, loginCookieWait, loginVerificationWait = 10*time.Millisecond, 300*time.Millisecond, 300*time.Millisecond, 300*time.Millisecond
+	loginSleep = func(ctx context.Context, _ time.Duration) error { return ctx.Err() }
 	t.Cleanup(func() {
-		loginFormSettle, loginRedirectWait, loginCookieWait, loginVerificationWait = oldSettle, oldRedirect, oldCookieWait, oldVerifyWait
+		loginFormSettle, loginRedirectWait, loginCookieWait, loginVerificationWait, loginSleep = oldSettle, oldRedirect, oldCookieWait, oldVerifyWait, oldSleep
 	})
 	f := &fakeLoginChrome{values: map[string]string{}}
 	const wsPath = "/devtools/page/fake-login-tab"
@@ -618,8 +654,57 @@ func (f *fakeLoginChrome) handle(method string, raw json.RawMessage) (any, error
 			Text string `json:"text"`
 		}
 		_ = json.Unmarshal(raw, &p)
-		f.typed = append(f.typed, p.Text)
+		f.insertTextCalls++
+		if f.focused == loginCheckcodeSel {
+			f.typed = append(f.typed, p.Text)
+		}
 		f.values[f.focused] = p.Text
+		return map[string]any{}, nil
+	case "Input.dispatchMouseEvent":
+		var p fakeMouseEvent
+		_ = json.Unmarshal(raw, &p)
+		f.mouseEvents = append(f.mouseEvents, p)
+		switch p.Type {
+		case "mouseMoved":
+			f.lastMouseMovedX, f.lastMouseMovedY, f.hasMouseMoved = p.X, p.Y, true
+		case "mousePressed":
+			f.lastMousePressedX, f.lastMousePressedY, f.hasMousePressed = p.X, p.Y, true
+		case "mouseReleased":
+			if f.hasMouseMoved && f.hasMousePressed &&
+				f.lastMouseMovedX == p.X && f.lastMouseMovedY == p.Y &&
+				f.lastMousePressedX == p.X && f.lastMousePressedY == p.Y {
+				switch {
+				case p.X == 130 && p.Y == 100:
+					f.focused = loginUsernameSel
+				case p.X == 130 && p.Y == 160:
+					f.focused = loginPasswordSel
+				case p.X == 130 && p.Y == 190:
+					f.focused = loginCheckcodeSel
+				case p.X == 130 && p.Y == 220:
+					if f.values[loginCheckcodeSel] != "" {
+						f.typed = append(f.typed, f.values[loginCheckcodeSel])
+						f.checkcodeSubmitted = true
+					} else {
+						f.typed = append(f.typed, f.values[loginUsernameSel], f.values[loginPasswordSel])
+					}
+					f.submits++
+					if f.wipeFirstSubmit && f.submits == 1 {
+						f.values = map[string]string{}
+					} else {
+						f.submitted = true
+					}
+				}
+			}
+			f.hasMousePressed = false
+		}
+		return map[string]any{}, nil
+	case "Input.dispatchKeyEvent":
+		var p fakeKeyEvent
+		_ = json.Unmarshal(raw, &p)
+		f.keyEvents = append(f.keyEvents, p)
+		if (p.Type == "char" || (!f.ignoreKeyDownText && p.Type == "keyDown" && p.Text != "")) && f.focused != "" && !f.rejectFieldInput[f.focused] {
+			f.values[f.focused] += p.Text
+		}
 		return map[string]any{}, nil
 	case "Page.captureScreenshot":
 		return map[string]any{"data": base64.StdEncoding.EncodeToString([]byte("fake-png-screenshot"))}, nil
@@ -652,10 +737,41 @@ func (f *fakeLoginChrome) evaluate(expr string, contextID int) (any, func()) {
 		// The form only exists in the passport world, and not at all when
 		// the page opened on a blocker.
 		return contextID == 7 && !f.initialVerification && !f.initialTMD && !f.noForm, nil
+	case strings.Contains(expr, "vibeusage-element-rect"):
+		for _, item := range []struct {
+			sel  string
+			x, y float64
+		}{
+			{loginUsernameSel, 120, 80},
+			{loginPasswordSel, 120, 140},
+			{loginCheckcodeSel, 120, 170},
+			{loginSubmitSel, 120, 200},
+		} {
+			if strings.Contains(expr, item.sel) {
+				if f.missingCoords[item.sel] {
+					return map[string]any{"x": 0.0, "y": 0.0, "ok": false}, nil
+				}
+				return map[string]any{"x": item.x, "y": item.y, "ok": true}, nil
+			}
+		}
+		return map[string]any{"x": 0.0, "y": 0.0, "ok": false}, nil
+	case strings.Contains(expr, "vibeusage-frame-offset"):
+		return map[string]any{"x": 10.0, "y": 20.0}, nil
+	case strings.Contains(expr, "vibeusage-clear-field"):
+		for _, sel := range []string{loginUsernameSel, loginPasswordSel, loginCheckcodeSel} {
+			if strings.Contains(expr, sel) {
+				f.values[sel] = ""
+				return true, nil
+			}
+		}
+		return false, nil
 	case strings.Contains(expr, "el.focus()"):
 		for _, sel := range []string{loginUsernameSel, loginPasswordSel, loginCheckcodeSel} {
 			if strings.Contains(expr, sel) {
 				f.focused = sel
+				if strings.Contains(expr, "vibeusage-js-focus") {
+					f.values[sel] = ""
+				}
 				return true, nil
 			}
 		}
@@ -663,11 +779,20 @@ func (f *fakeLoginChrome) evaluate(expr string, contextID int) (any, func()) {
 	case strings.HasSuffix(expr, ").value"):
 		for sel, value := range f.values {
 			if strings.Contains(expr, sel) {
+				if f.clearBeforeSubmit[sel] {
+					delete(f.clearBeforeSubmit, sel)
+					f.values[sel] = ""
+					return value, nil
+				}
 				return value, nil
 			}
 		}
 		return "", nil
 	case strings.Contains(expr, loginSubmitSel) && strings.HasSuffix(expr, ".click()"):
+		f.jsSubmitClicks++
+		if f.values[loginCheckcodeSel] == "" {
+			f.typed = append(f.typed, f.values[loginUsernameSel], f.values[loginPasswordSel])
+		}
 		f.submits++
 		if f.wipeFirstSubmit && f.submits == 1 {
 			// Mimic the real page: its late initialisation cleared what we
@@ -1548,4 +1673,963 @@ func TestR1_6_AssistedVerificationMixedSignalTransitionCompletesSignIn(t *testin
 	if clicks != 1 {
 		t.Errorf("getCodeClicks = %d, want 1", clicks)
 	}
+}
+
+func TestHumanizedLoginDispatchesOnlyTrustedMouseAndKeyEvents(t *testing.T) {
+	t.Run("trusted_mouse_focus_key_typing_and_mouse_submit", func(t *testing.T) {
+		chrome := newFakeLoginChrome(t)
+		creds := loginCredentials{
+			Username: "op_user@example.com",
+			Password: "Op!Pass#42",
+		}
+
+		session, err := performModelStudioAutoLogin(context.Background(), chrome.port, creds)
+		if err != nil {
+			t.Fatalf("performModelStudioAutoLogin: %v", err)
+		}
+		if !strings.Contains(session.Cookie, "login_aliyunid_ticket=") {
+			t.Fatalf("expected session cookie, got %+v", session)
+		}
+
+		chrome.mu.Lock()
+		defer chrome.mu.Unlock()
+
+		if chrome.insertTextCalls != 0 {
+			t.Errorf("insertTextCalls = %d, want 0 (credential fill must never use Input.insertText)", chrome.insertTextCalls)
+		}
+		if chrome.jsSubmitClicks != 0 {
+			t.Errorf("jsSubmitClicks = %d, want 0 (submit must never use JS .click())", chrome.jsSubmitClicks)
+		}
+
+		// Expect 3 trusted mouse click sequences: username (130, 100), password (130, 160), submit (130, 220).
+		wantClicks := []struct {
+			name string
+			x, y float64
+		}{
+			{"username focus", 130, 100},
+			{"password focus", 130, 160},
+			{"submit click", 130, 220},
+		}
+		if len(chrome.mouseEvents) != len(wantClicks)*3 {
+			t.Fatalf("len(mouseEvents) = %d, want %d: %+v", len(chrome.mouseEvents), len(wantClicks)*3, chrome.mouseEvents)
+		}
+		for i, wc := range wantClicks {
+			moved := chrome.mouseEvents[i*3]
+			pressed := chrome.mouseEvents[i*3+1]
+			released := chrome.mouseEvents[i*3+2]
+			if moved.Type != "mouseMoved" || moved.X != wc.x || moved.Y != wc.y {
+				t.Errorf("%s mouseMoved = %+v, want at (%v, %v)", wc.name, moved, wc.x, wc.y)
+			}
+			if pressed.Type != "mousePressed" || pressed.X != wc.x || pressed.Y != wc.y || pressed.Button != "left" || pressed.Buttons != 1 || pressed.ClickCount != 1 {
+				t.Errorf("%s mousePressed = %+v, want left button click at (%v, %v)", wc.name, pressed, wc.x, wc.y)
+			}
+			if released.Type != "mouseReleased" || released.X != wc.x || released.Y != wc.y || released.Button != "left" || released.Buttons != 0 || released.ClickCount != 1 {
+				t.Errorf("%s mouseReleased = %+v, want left button release at (%v, %v)", wc.name, released, wc.x, wc.y)
+			}
+		}
+
+		allRunes := []rune(creds.Username + creds.Password)
+		if len(chrome.keyEvents) != len(allRunes)*3 {
+			t.Fatalf("len(keyEvents) = %d, want %d (3 events per rune)", len(chrome.keyEvents), len(allRunes)*3)
+		}
+		var typedChars strings.Builder
+		for i, r := range allRunes {
+			down := chrome.keyEvents[i*3]
+			ch := chrome.keyEvents[i*3+1]
+			up := chrome.keyEvents[i*3+2]
+			wantStr := string(r)
+			if down.Type != "rawKeyDown" || down.Text != "" || down.UnmodifiedText != "" || down.Key != wantStr || down.Code == "" {
+				t.Errorf("rune %d rawKeyDown = %+v", i, down)
+			}
+			if ch.Type != "char" || ch.Text != wantStr || ch.UnmodifiedText != wantStr {
+				t.Errorf("rune %d char = %+v", i, ch)
+			}
+			if up.Type != "keyUp" || up.Key != wantStr || up.Text != "" {
+				t.Errorf("rune %d keyUp = %+v", i, up)
+			}
+			typedChars.WriteString(ch.Text)
+		}
+		if got := typedChars.String(); got != creds.Username+creds.Password {
+			t.Errorf("reassembled char events = %q, want %q", got, creds.Username+creds.Password)
+		}
+		if got := strings.Join(chrome.typed, "|"); got != creds.Username+"|"+creds.Password {
+			t.Errorf("submitted values = %q, want %q", got, creds.Username+"|"+creds.Password)
+		}
+	})
+
+	t.Run("missing_coordinates_falls_back_to_js_focus_with_debug_log", func(t *testing.T) {
+		chrome := newFakeLoginChrome(t)
+		chrome.missingCoords = map[string]bool{loginUsernameSel: true}
+
+		var logBuf bytes.Buffer
+		logger := logging.NewLogger(&logBuf)
+		logging.Configure(logger, logging.Flags{Verbose: true, NoColor: true})
+		ctx := logging.WithLogger(context.Background(), logger)
+
+		creds := loginCredentials{Username: "fallback@example.com", Password: "Pw9!"}
+		if _, err := performModelStudioAutoLogin(ctx, chrome.port, creds); err != nil {
+			t.Fatalf("performModelStudioAutoLogin with missing username coords: %v", err)
+		}
+
+		if !strings.Contains(logBuf.String(), "field coordinates unavailable; falling back to JS focus") ||
+			!strings.Contains(logBuf.String(), loginUsernameSel) {
+			t.Errorf("expected JS-focus fallback debug log for %s, got log:\n%s", loginUsernameSel, logBuf.String())
+		}
+
+		chrome.mu.Lock()
+		defer chrome.mu.Unlock()
+		if chrome.insertTextCalls != 0 {
+			t.Errorf("insertTextCalls = %d, want 0 even when focus falls back to JS", chrome.insertTextCalls)
+		}
+		if chrome.jsSubmitClicks != 0 {
+			t.Errorf("jsSubmitClicks = %d, want 0", chrome.jsSubmitClicks)
+		}
+	})
+}
+
+func TestHumanizedLoginKeyPacingWithinBounds(t *testing.T) {
+	runDeterministicPacingCheck(t)
+}
+
+func TestHumanizedLoginCredentialsNeverReachLogsDiagnosticsOrErrors(t *testing.T) {
+	const (
+		secretUser = "user-secret-login-id@example.com"
+		secretPass = "pw-secret-val-98765!"
+	)
+	creds := loginCredentials{Username: secretUser, Password: secretPass}
+
+	assertNoLeak := func(t *testing.T, label, text string) {
+		t.Helper()
+		for _, secret := range []string{secretUser, secretPass} {
+			if strings.Contains(text, secret) {
+				t.Errorf("%s leaked credential %q: %s", label, secret, text)
+			}
+		}
+	}
+
+	t.Run("verbose_success_and_diagnostics", func(t *testing.T) {
+		chrome := newFakeLoginChrome(t)
+		var logBuf bytes.Buffer
+		logger := logging.NewLogger(&logBuf)
+		logging.Configure(logger, logging.Flags{Verbose: true, NoColor: true})
+		ctx := logging.WithLogger(context.Background(), logger)
+
+		if _, err := performModelStudioAutoLogin(ctx, chrome.port, creds); err != nil {
+			t.Fatalf("performModelStudioAutoLogin: %v", err)
+		}
+		assertNoLeak(t, "verbose log on success", logBuf.String())
+	})
+
+	t.Run("field_rejected_error_quotes_selector_only", func(t *testing.T) {
+		chrome := newFakeLoginChrome(t)
+		chrome.rejectFieldInput = map[string]bool{loginPasswordSel: true}
+		oldRedirect := loginRedirectWait
+		loginRedirectWait = 20 * time.Millisecond
+		t.Cleanup(func() { loginRedirectWait = oldRedirect })
+
+		var logBuf bytes.Buffer
+		logger := logging.NewLogger(&logBuf)
+		logging.Configure(logger, logging.Flags{Verbose: true, NoColor: true})
+		ctx := logging.WithLogger(context.Background(), logger)
+
+		_, err := performModelStudioAutoLogin(ctx, chrome.port, creds)
+		if err == nil {
+			t.Fatal("expected error when password field rejects input")
+		}
+		if err.Error() != "enter password: "+loginPasswordSel+" did not accept input" {
+			t.Errorf("expected exact selector-only error for %s, got %q", loginPasswordSel, err.Error())
+		}
+		assertNoLeak(t, "field-rejected error string", err.Error())
+		assertNoLeak(t, "field-rejected verbose log", logBuf.String())
+
+		page, dialErr := dialCDP(ctx, chrome.port, "/devtools/page/fake-login-tab")
+		if dialErr != nil {
+			t.Fatalf("dialCDP: %v", dialErr)
+		}
+		defer page.Close()
+		rawErr := page.typeCredentialInto(ctx, logger, 7, loginPasswordSel, secretPass)
+		if rawErr == nil {
+			t.Fatal("expected direct typeCredentialInto error")
+		}
+		if rawErr.Error() != loginPasswordSel+" did not accept input" {
+			t.Errorf("raw helper error = %q, want %q (must quote selector only, never value)", rawErr.Error(), loginPasswordSel+" did not accept input")
+		}
+		assertNoLeak(t, "direct typeCredentialInto error", rawErr.Error())
+	})
+
+	t.Run("cleared_before_submit_and_failure_diagnostics", func(t *testing.T) {
+		chrome := newFakeLoginChrome(t)
+		chrome.clearBeforeSubmit = map[string]bool{loginUsernameSel: true}
+		chrome.rejectCheckcode = "Account " + secretUser + " or password " + secretPass + " invalid"
+
+		var logBuf bytes.Buffer
+		logger := logging.NewLogger(&logBuf)
+		logging.Configure(logger, logging.Flags{Verbose: true, NoColor: true})
+		ctx := logging.WithLogger(context.Background(), logger)
+
+		_, err := performModelStudioAutoLogin(ctx, chrome.port, creds)
+		if err == nil {
+			t.Fatal("expected error when form is rejected")
+		}
+		assertNoLeak(t, "returned error", err.Error())
+		assertNoLeak(t, "verbose log with failureDiagnostics", logBuf.String())
+	})
+}
+
+type r1ScriptedCDPConn struct {
+	mu                    sync.Mutex
+	pending               bytes.Buffer
+	chrome                *fakeLoginChrome
+	deadlines             []time.Time
+	calls                 int
+	closed                bool
+	noReply               bool
+	blockRead             chan struct{}
+	abortRead             chan struct{}
+	abortReadClosed       bool
+	readEntered           chan struct{}
+	readEnteredClosed     bool
+	closedSig             chan struct{}
+	closedSigClosed       bool
+	interruptedByDeadline bool
+	interruptedByClose    bool
+	releasedByAbort       bool
+	ignoreKeyDownText     bool
+	intercept             func(method string, raw json.RawMessage) (errMsg string, intercept bool)
+}
+
+func newR1ScriptedPage(ignoreKeyDownText bool) (*cdpConn, *r1ScriptedCDPConn) {
+	transport := &r1ScriptedCDPConn{
+		chrome:            &fakeLoginChrome{values: map[string]string{}},
+		ignoreKeyDownText: ignoreKeyDownText,
+	}
+	return &cdpConn{conn: transport, reader: bufio.NewReader(transport)}, transport
+}
+
+func (c *r1ScriptedCDPConn) releaseAbort() {
+	c.mu.Lock()
+	var abortCh chan struct{}
+	if c.abortRead != nil && !c.abortReadClosed {
+		c.abortReadClosed = true
+		abortCh = c.abortRead
+	}
+	c.mu.Unlock()
+	if abortCh != nil {
+		close(abortCh)
+	}
+}
+
+func (c *r1ScriptedCDPConn) Read(p []byte) (int, error) {
+	c.mu.Lock()
+	blockCh := c.blockRead
+	abortCh := c.abortRead
+	var enteredCh chan struct{}
+	if blockCh != nil && c.readEntered != nil && !c.readEnteredClosed {
+		c.readEnteredClosed = true
+		enteredCh = c.readEntered
+	}
+	noReply := c.noReply
+	closed := c.closed
+	c.mu.Unlock()
+
+	if enteredCh != nil {
+		close(enteredCh)
+	}
+
+	if blockCh != nil {
+		select {
+		case <-blockCh:
+			return 0, net.ErrClosed
+		case <-abortCh:
+			c.mu.Lock()
+			c.releasedByAbort = true
+			c.mu.Unlock()
+			return 0, errors.New("scripted read released by failure watchdog abort")
+		}
+	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.closed || closed {
+		return 0, net.ErrClosed
+	}
+	if c.noReply || noReply {
+		return 0, errors.New("scripted no-reply read timeout")
+	}
+	return c.pending.Read(p)
+}
+
+func (c *r1ScriptedCDPConn) Write(p []byte) (int, error) {
+	c.mu.Lock()
+	if c.closed {
+		c.mu.Unlock()
+		return 0, net.ErrClosed
+	}
+	c.mu.Unlock()
+
+	raw, err := readFakeWSFrame(bufio.NewReader(bytes.NewReader(p)))
+	if err != nil {
+		return 0, err
+	}
+	var msg struct {
+		ID     int             `json:"id"`
+		Method string          `json:"method"`
+		Params json.RawMessage `json:"params"`
+	}
+	if err := json.Unmarshal(raw, &msg); err != nil {
+		return 0, err
+	}
+
+	c.mu.Lock()
+	c.calls++
+	intercept := c.intercept
+	c.mu.Unlock()
+
+	if intercept != nil {
+		if errMsg, ok := intercept(msg.Method, msg.Params); ok {
+			if errMsg == "BLOCK_READ" {
+				_, _ = c.chrome.handle(msg.Method, msg.Params)
+				c.mu.Lock()
+				if c.blockRead == nil {
+					c.blockRead = make(chan struct{})
+				}
+				c.mu.Unlock()
+				return len(p), nil
+			}
+			c.mu.Lock()
+			defer c.mu.Unlock()
+			if errMsg == "NO_REPLY" {
+				c.noReply = true
+				return len(p), nil
+			}
+			reply, _ := json.Marshal(map[string]any{
+				"id":    msg.ID,
+				"error": map[string]string{"message": errMsg},
+			})
+			c.pending.Write(encodeFakeWSFrame(reply))
+			return len(p), nil
+		}
+	}
+
+	paramsToHandle := msg.Params
+	if c.ignoreKeyDownText && msg.Method == "Input.dispatchKeyEvent" {
+		var kv map[string]any
+		if json.Unmarshal(msg.Params, &kv) == nil && kv["type"] == "keyDown" {
+			delete(kv, "text")
+			delete(kv, "unmodifiedText")
+			paramsToHandle, _ = json.Marshal(kv)
+		}
+	}
+
+	result, rpcErr := c.chrome.handle(msg.Method, paramsToHandle)
+
+	replyObj := map[string]any{"id": msg.ID, "result": result}
+	if rpcErr != nil {
+		replyObj = map[string]any{"id": msg.ID, "error": map[string]string{"message": rpcErr.Error()}}
+	}
+	reply, _ := json.Marshal(replyObj)
+
+	c.mu.Lock()
+	c.pending.Write(encodeFakeWSFrame(reply))
+	c.mu.Unlock()
+	return len(p), nil
+}
+
+func (c *r1ScriptedCDPConn) Close() error {
+	c.mu.Lock()
+	wasClosed := c.closed
+	c.closed = true
+	c.interruptedByClose = true
+	blockCh := c.blockRead
+	c.blockRead = nil
+	var sigCh chan struct{}
+	if c.closedSig != nil && !c.closedSigClosed {
+		c.closedSigClosed = true
+		sigCh = c.closedSig
+	}
+	c.mu.Unlock()
+	if !wasClosed && blockCh != nil {
+		close(blockCh)
+	}
+	if sigCh != nil {
+		close(sigCh)
+	}
+	return nil
+}
+
+func (c *r1ScriptedCDPConn) LocalAddr() net.Addr  { return nil }
+func (c *r1ScriptedCDPConn) RemoteAddr() net.Addr { return nil }
+
+func (c *r1ScriptedCDPConn) SetDeadline(d time.Time) error {
+	c.mu.Lock()
+	c.deadlines = append(c.deadlines, d)
+	var blockCh chan struct{}
+	if !d.IsZero() && d.Year() <= 1971 {
+		c.interruptedByDeadline = true
+		blockCh = c.blockRead
+		c.blockRead = nil
+	}
+	c.mu.Unlock()
+	if blockCh != nil {
+		close(blockCh)
+	}
+	return nil
+}
+
+func (c *r1ScriptedCDPConn) SetReadDeadline(d time.Time) error  { return c.SetDeadline(d) }
+func (c *r1ScriptedCDPConn) SetWriteDeadline(d time.Time) error { return c.SetDeadline(d) }
+
+func TestR1_1_AssistedVerificationUsesTrustedMouseAndKeyEventsWithoutInsertTextOrJSClick(t *testing.T) {
+	isolateParkFixture(t)
+	t.Setenv(assistedLoginEnv, "1")
+
+	oldSleep := loginSleep
+	loginSleep = func(ctx context.Context, _ time.Duration) error { return ctx.Err() }
+	t.Cleanup(func() { loginSleep = oldSleep })
+
+	oldVerifyWait := loginVerificationWait
+	loginVerificationWait = 2 * time.Second
+	t.Cleanup(func() { loginVerificationWait = oldVerifyWait })
+
+	chrome := newFakeLoginChrome(t)
+	chrome.ignoreKeyDownText = true
+	chrome.verification = true
+	const smsCode = "654321"
+	var delivered atomic.Bool
+	chrome.onGetCodeClick = func() {
+		if delivered.CompareAndSwap(false, true) {
+			if err := DeliverVerificationCode(smsCode); err != nil {
+				t.Errorf("DeliverVerificationCode: %v", err)
+			}
+		}
+	}
+
+	creds := loginCredentials{Username: "assist@example.com", Password: "Pw#123"}
+	session, err := performModelStudioAutoLogin(context.Background(), chrome.port, creds)
+	if err != nil {
+		t.Fatalf("performModelStudioAutoLogin assisted: %v", err)
+	}
+	if !strings.Contains(session.Cookie, "login_aliyunid_ticket=ticket") {
+		t.Fatalf("unexpected session cookie: %q", session.Cookie)
+	}
+
+	chrome.mu.Lock()
+	defer chrome.mu.Unlock()
+
+	if chrome.insertTextCalls != 0 {
+		t.Errorf("insertTextCalls = %d, want 0 across both credential and assisted checkcode entry", chrome.insertTextCalls)
+	}
+	if chrome.jsSubmitClicks != 0 {
+		t.Errorf("jsSubmitClicks = %d, want 0 across both credential and assisted checkcode submit", chrome.jsSubmitClicks)
+	}
+
+	// 5 trusted clicks: username (130, 100), password (130, 160), submit (130, 220),
+	// checkcode (130, 190), submit (130, 220).
+	wantClicks := []struct {
+		name string
+		x, y float64
+	}{
+		{"username focus", 130, 100},
+		{"password focus", 130, 160},
+		{"credential submit", 130, 220},
+		{"checkcode focus", 130, 190},
+		{"checkcode submit", 130, 220},
+	}
+	if len(chrome.mouseEvents) != len(wantClicks)*3 {
+		t.Fatalf("len(mouseEvents) = %d, want %d (5 trusted clicks): %+v", len(chrome.mouseEvents), len(wantClicks)*3, chrome.mouseEvents)
+	}
+	for i, wc := range wantClicks {
+		moved := chrome.mouseEvents[i*3]
+		pressed := chrome.mouseEvents[i*3+1]
+		released := chrome.mouseEvents[i*3+2]
+		if moved.Type != "mouseMoved" || moved.X != wc.x || moved.Y != wc.y {
+			t.Errorf("%s mouseMoved = %+v, want at (%v, %v)", wc.name, moved, wc.x, wc.y)
+		}
+		if pressed.Type != "mousePressed" || pressed.X != wc.x || pressed.Y != wc.y || pressed.Button != "left" {
+			t.Errorf("%s mousePressed = %+v", wc.name, pressed)
+		}
+		if released.Type != "mouseReleased" || released.X != wc.x || released.Y != wc.y || released.Button != "left" {
+			t.Errorf("%s mouseReleased = %+v", wc.name, released)
+		}
+	}
+
+	allRunes := []rune(creds.Username + creds.Password + smsCode)
+	if len(chrome.keyEvents) != len(allRunes)*3 {
+		t.Fatalf("len(keyEvents) = %d, want %d (3 key events per rune including checkcode)", len(chrome.keyEvents), len(allRunes)*3)
+	}
+	for i, r := range allRunes {
+		down := chrome.keyEvents[i*3]
+		ch := chrome.keyEvents[i*3+1]
+		up := chrome.keyEvents[i*3+2]
+		wantStr := string(r)
+		if down.Type != "rawKeyDown" || down.Text != "" || down.UnmodifiedText != "" || down.Key != wantStr {
+			t.Errorf("rune %d rawKeyDown = %+v", i, down)
+		}
+		if ch.Type != "char" || ch.Text != wantStr || ch.UnmodifiedText != wantStr {
+			t.Errorf("rune %d char = %+v", i, ch)
+		}
+		if up.Type != "keyUp" || up.Text != "" || up.Key != wantStr {
+			t.Errorf("rune %d keyUp = %+v", i, up)
+		}
+	}
+}
+
+func TestR1_2_KeySequenceUsesRawKeyDownWithoutDoubleInsertion(t *testing.T) {
+	oldSleep := loginSleep
+	loginSleep = func(ctx context.Context, _ time.Duration) error { return ctx.Err() }
+	t.Cleanup(func() { loginSleep = oldSleep })
+
+	chrome := newFakeLoginChrome(t)
+	creds := loginCredentials{Username: "nodouble@example.com", Password: "Secret!42"}
+
+	if _, err := performModelStudioAutoLogin(context.Background(), chrome.port, creds); err != nil {
+		t.Fatalf("performModelStudioAutoLogin failed (text-bearing keyDown would double-insert and fail value re-read): %v", err)
+	}
+
+	chrome.mu.Lock()
+	defer chrome.mu.Unlock()
+
+	if got := chrome.values[loginUsernameSel]; got != creds.Username {
+		t.Errorf("username field value = %q, want %q", got, creds.Username)
+	}
+	if got := chrome.values[loginPasswordSel]; got != creds.Password {
+		t.Errorf("password field value = %q, want %q", got, creds.Password)
+	}
+
+	allRunes := []rune(creds.Username + creds.Password)
+	if len(chrome.keyEvents) != len(allRunes)*3 {
+		t.Fatalf("len(keyEvents) = %d, want %d", len(chrome.keyEvents), len(allRunes)*3)
+	}
+	for i, r := range allRunes {
+		down := chrome.keyEvents[i*3]
+		ch := chrome.keyEvents[i*3+1]
+		up := chrome.keyEvents[i*3+2]
+		wantStr := string(r)
+		if down.Type != "rawKeyDown" || down.Text != "" || down.UnmodifiedText != "" {
+			t.Errorf("rune %d (%q) expected rawKeyDown with empty text/unmodifiedText, got %+v", i, wantStr, down)
+		}
+		if ch.Type != "char" || ch.Text != wantStr || ch.UnmodifiedText != wantStr {
+			t.Errorf("rune %d (%q) expected char with text=%q, got %+v", i, wantStr, wantStr, ch)
+		}
+		if up.Type != "keyUp" || up.Text != "" || up.UnmodifiedText != "" {
+			t.Errorf("rune %d (%q) expected keyUp with empty text, got %+v", i, wantStr, up)
+		}
+	}
+}
+
+func TestR1_3_FillAndSubmitBoundsCDPIODeadlineCancelsAndRestores(t *testing.T) {
+	t0 := time.Date(2099, 1, 1, 12, 0, 0, 0, time.UTC)
+	withInjectedModelStudioClock(t, func() time.Time { return t0 })
+
+	oldSleep := loginSleep
+	loginSleep = func(ctx context.Context, _ time.Duration) error { return ctx.Err() }
+	t.Cleanup(func() { loginSleep = oldSleep })
+
+	overall := t0.Add(loginOverallDeadline)
+	wantFillDeadline := t0.Add(loginFillSubmitTimeout)
+
+	for _, stage := range []string{"geometry", "mouse", "keyDown", "submit"} {
+		t.Run("stalled_"+stage, func(t *testing.T) {
+			page, transport := newR1ScriptedPage(true)
+			outerCtx, outerCancel := context.WithDeadline(context.Background(), overall)
+			defer outerCancel()
+
+			transport.intercept = func(method string, raw json.RawMessage) (string, bool) {
+				s := string(raw)
+				match := (stage == "geometry" && method == "Runtime.evaluate" && strings.Contains(s, "vibeusage-element-rect")) ||
+					(stage == "mouse" && method == "Input.dispatchMouseEvent") ||
+					(stage == "keyDown" && method == "Input.dispatchKeyEvent") ||
+					(stage == "submit" && method == "Runtime.evaluate" && strings.Contains(s, "vibeusage-element-rect") && strings.Contains(s, loginSubmitSel))
+				if match {
+					return "NO_REPLY", true
+				}
+				return "", false
+			}
+
+			err := page.fillAndSubmit(outerCtx, nil, 7, loginCredentials{Username: "u", Password: "p"})
+			if err == nil {
+				t.Fatalf("stage %s: expected stalled read error", stage)
+			}
+
+			transport.mu.Lock()
+			deadlines := append([]time.Time(nil), transport.deadlines...)
+			closed := transport.closed
+			transport.mu.Unlock()
+
+			if len(deadlines) == 0 {
+				t.Fatalf("stage %s: expected fillAndSubmit to set transport deadline to %v, but 0 deadlines were set", stage, wantFillDeadline)
+			}
+			lastDeadline := deadlines[len(deadlines)-1]
+			if !lastDeadline.Equal(wantFillDeadline) {
+				t.Fatalf("stage %s: active transport deadline at stalled I/O = %v, want %v (overall=%v)", stage, lastDeadline, wantFillDeadline, overall)
+			}
+			if !closed {
+				t.Errorf("stage %s: expected transport to be closed after stalled frame read so desynchronized stream cannot be reused", stage)
+			}
+			if reuseErr := page.call("Page.enable", nil, nil); reuseErr == nil {
+				t.Errorf("stage %s: expected subsequent call on broken cdpConn to fail instead of reusing desynchronized stream", stage)
+			}
+		})
+	}
+
+	t.Run("cancellation_mid_keydown_interrupts_read_and_skips_remaining_events", func(t *testing.T) {
+		runMidKeyDownCancellationCheck(t)
+	})
+
+	t.Run("successful_fill_restores_overall_deadline", func(t *testing.T) {
+		page, transport := newR1ScriptedPage(true)
+		outerCtx, outerCancel := context.WithDeadline(context.Background(), overall)
+		defer outerCancel()
+
+		if err := page.fillAndSubmit(outerCtx, nil, 7, loginCredentials{Username: "u", Password: "p"}); err != nil {
+			t.Fatalf("fillAndSubmit: %v", err)
+		}
+
+		transport.mu.Lock()
+		deadlines := append([]time.Time(nil), transport.deadlines...)
+		transport.mu.Unlock()
+
+		if len(deadlines) < 2 {
+			t.Fatalf("expected fill deadlines followed by restored overall deadline, got %v", deadlines)
+		}
+		for i, dl := range deadlines[:len(deadlines)-1] {
+			if !dl.Equal(wantFillDeadline) {
+				t.Fatalf("call %d deadline during fillAndSubmit = %v, want %v", i, dl, wantFillDeadline)
+			}
+		}
+		restored := deadlines[len(deadlines)-1]
+		if !restored.Equal(overall) {
+			t.Fatalf("restored deadline after fillAndSubmit = %v, want overall deadline %v", restored, overall)
+		}
+	})
+}
+
+func TestR1_4_KeyDispatchErrorNeverLeaksEventPayloadFragments(t *testing.T) {
+	oldSleep := loginSleep
+	loginSleep = func(ctx context.Context, _ time.Duration) error { return ctx.Err() }
+	t.Cleanup(func() { loginSleep = oldSleep })
+
+	creds := loginCredentials{
+		Username: "review_account@example.invalid",
+		Password: "Z_Synthetic_Pass_42!",
+	}
+	const fragment = `params={"type":"rawKeyDown","text":"Z","unmodifiedText":"Z","key":"Z","code":"KeyZ","windowsVirtualKeyCode":90}`
+	forbiddenFragments := []string{
+		fragment,
+		`"text":"Z"`,
+		`"unmodifiedText":"Z"`,
+		`"code":"KeyZ"`,
+		`"windowsVirtualKeyCode":90`,
+		"Invalid parameters",
+		creds.Username,
+		creds.Password,
+	}
+
+	for _, eventPhase := range []string{"KeyDown", "char", "keyUp"} {
+		t.Run("phase_"+eventPhase, func(t *testing.T) {
+			page, transport := newR1ScriptedPage(true)
+			var logBuf bytes.Buffer
+			logger := logging.NewLogger(&logBuf)
+			logging.Configure(logger, logging.Flags{Verbose: true, NoColor: true})
+
+			transport.intercept = func(method string, raw json.RawMessage) (string, bool) {
+				if method != "Input.dispatchKeyEvent" || transport.chrome.focused != loginPasswordSel {
+					return "", false
+				}
+				s := string(raw)
+				match := (eventPhase == "KeyDown" && (strings.Contains(s, `"rawKeyDown"`) || strings.Contains(s, `"keyDown"`))) ||
+					(eventPhase == "char" && strings.Contains(s, `"char"`)) ||
+					(eventPhase == "keyUp" && strings.Contains(s, `"keyUp"`))
+				if match {
+					return "Invalid parameters: " + fragment, true
+				}
+				return "", false
+			}
+
+			rawErr := page.typeCredentialInto(context.Background(), logger, 7, loginPasswordSel, creds.Password)
+			if rawErr == nil {
+				t.Fatalf("phase %s: expected key dispatch error", eventPhase)
+			}
+			wantDirect := "dispatch key event on " + loginPasswordSel
+			if rawErr.Error() != wantDirect {
+				t.Errorf("phase %s: direct typeCredentialInto error = %q, want %q", eventPhase, rawErr.Error(), wantDirect)
+			}
+			if unwrapped := errors.Unwrap(rawErr); unwrapped != nil {
+				t.Errorf("phase %s: expected nil unwrap on controlled key dispatch error, got %v", eventPhase, unwrapped)
+			}
+
+			page2, transport2 := newR1ScriptedPage(true)
+			transport2.intercept = transport.intercept
+			fillErr := page2.fillAndSubmit(context.Background(), logger, 7, creds)
+			if fillErr == nil {
+				t.Fatalf("phase %s: expected fillAndSubmit error", eventPhase)
+			}
+			logger.Debug("filling sign-in form failed", "err", page2.redactSecrets(fillErr.Error()))
+			finalErr := attemptRedactedError{cause: fillErr, text: page2.redactSecrets(fillErr.Error())}
+
+			for _, forbidden := range forbiddenFragments {
+				if strings.Contains(rawErr.Error(), forbidden) {
+					t.Errorf("phase %s: direct error leaked %q: %s", eventPhase, forbidden, rawErr.Error())
+				}
+				if strings.Contains(fillErr.Error(), forbidden) {
+					t.Errorf("phase %s: fillAndSubmit error leaked %q: %s", eventPhase, forbidden, fillErr.Error())
+				}
+				if strings.Contains(finalErr.Error(), forbidden) {
+					t.Errorf("phase %s: final redacted error leaked %q: %s", eventPhase, forbidden, finalErr.Error())
+				}
+				if strings.Contains(logBuf.String(), forbidden) {
+					t.Errorf("phase %s: verbose log leaked %q: %s", eventPhase, forbidden, logBuf.String())
+				}
+			}
+		})
+	}
+}
+
+func runDeterministicPacingCheck(t *testing.T) {
+	t.Helper()
+
+	t0 := time.Date(2099, 1, 1, 12, 0, 0, 0, time.UTC)
+	virtualNow := t0
+	withInjectedModelStudioClock(t, func() time.Time { return virtualNow })
+
+	var recordedDelays []time.Duration
+	var observedDeadlines []time.Time
+	var remainingAtStep []time.Duration
+
+	oldSleep := loginSleep
+	loginSleep = func(ctx context.Context, d time.Duration) error {
+		recordedDelays = append(recordedDelays, d)
+		virtualNow = virtualNow.Add(d)
+		if dl, ok := ctx.Deadline(); ok {
+			observedDeadlines = append(observedDeadlines, dl)
+			remainingAtStep = append(remainingAtStep, dl.Sub(virtualNow))
+		}
+		return ctx.Err()
+	}
+	t.Cleanup(func() { loginSleep = oldSleep })
+
+	creds := loginCredentials{
+		Username: "pacing_operator@example.com",
+		Password: "Pacing#Secret!2026",
+	}
+	overall := t0.Add(loginOverallDeadline)
+	wantFillDeadline := t0.Add(loginFillSubmitTimeout)
+
+	page, transport := newR1ScriptedPage(true)
+	outerCtx, outerCancel := context.WithDeadline(context.Background(), overall)
+	defer outerCancel()
+
+	if err := page.fillAndSubmit(outerCtx, nil, 7, creds); err != nil {
+		t.Fatalf("fillAndSubmit over in-memory scripted transport: %v", err)
+	}
+
+	wantDelayCount := len([]rune(creds.Username)) + len([]rune(creds.Password))
+	if len(recordedDelays) != wantDelayCount {
+		t.Fatalf("len(recordedDelays) = %d, want %d", len(recordedDelays), wantDelayCount)
+	}
+	var sumDelays time.Duration
+	for i, d := range recordedDelays {
+		if d < loginKeyDelayMin || d > loginKeyDelayMax {
+			t.Errorf("delay[%d] = %v, outside humanized bounds [%v, %v]", i, d, loginKeyDelayMin, loginKeyDelayMax)
+		}
+		sumDelays += d
+	}
+	if gotAdvance := virtualNow.Sub(t0); gotAdvance != sumDelays {
+		t.Errorf("virtual clock advance = %v, want exact sum of delays %v", gotAdvance, sumDelays)
+	}
+	if sumDelays <= 0 || sumDelays >= loginFillSubmitTimeout {
+		t.Errorf("accumulated virtual delay = %v, want within (0, %v)", sumDelays, loginFillSubmitTimeout)
+	}
+
+	if len(observedDeadlines) != wantDelayCount {
+		t.Fatalf("len(observedDeadlines) = %d, want %d", len(observedDeadlines), wantDelayCount)
+	}
+	for i, dl := range observedDeadlines {
+		if !dl.Equal(wantFillDeadline) {
+			t.Fatalf("step %d fillCtx deadline = %v, want injected-clock deadline %v", i, dl, wantFillDeadline)
+		}
+		if remainingAtStep[i] <= 0 || remainingAtStep[i] > loginFillSubmitTimeout {
+			t.Errorf("step %d remaining virtual budget = %v, want within (0, %v]", i, remainingAtStep[i], loginFillSubmitTimeout)
+		}
+	}
+
+	transport.mu.Lock()
+	deadlines := append([]time.Time(nil), transport.deadlines...)
+	transport.mu.Unlock()
+	if len(deadlines) < 2 {
+		t.Fatalf("expected transport deadlines to be set during fillAndSubmit and restored afterward, got %v", deadlines)
+	}
+	for i, dl := range deadlines[:len(deadlines)-1] {
+		if !dl.Equal(wantFillDeadline) {
+			t.Fatalf("transport deadline[%d] = %v, want %v", i, dl, wantFillDeadline)
+		}
+	}
+	if restored := deadlines[len(deadlines)-1]; !restored.Equal(overall) {
+		t.Fatalf("restored transport deadline = %v, want %v", restored, overall)
+	}
+
+	if loginFillSubmitTimeout > 30*time.Second || loginFillSubmitTimeout >= loginOverallDeadline {
+		t.Errorf("loginFillSubmitTimeout = %v, must be <= 30s and < loginOverallDeadline (%v)", loginFillSubmitTimeout, loginOverallDeadline)
+	}
+}
+
+func TestR1_5_DeterministicClockAndInMemoryTransportPacing(t *testing.T) {
+	runDeterministicPacingCheck(t)
+
+	t.Run("virtual_clock_exceeding_fill_deadline_aborts_deterministically", func(t *testing.T) {
+		t0 := time.Date(2099, 1, 1, 12, 0, 0, 0, time.UTC)
+		virtualNow := t0
+		withInjectedModelStudioClock(t, func() time.Time { return virtualNow })
+
+		oldSleep := loginSleep
+		loginSleep = func(ctx context.Context, _ time.Duration) error {
+			virtualNow = virtualNow.Add(12 * time.Second)
+			return ctx.Err()
+		}
+		t.Cleanup(func() { loginSleep = oldSleep })
+
+		page, _ := newR1ScriptedPage(true)
+		err := page.fillAndSubmit(context.Background(), nil, 7, loginCredentials{Username: "abcd", Password: "efgh"})
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("expected context.DeadlineExceeded when virtual clock crosses 30s fill deadline, got %v", err)
+		}
+		if gotAdvance := virtualNow.Sub(t0); gotAdvance != 36*time.Second {
+			t.Errorf("virtual clock advanced %v before aborting, want 36s (3 steps of 12s)", gotAdvance)
+		}
+	})
+}
+
+func runMidKeyDownCancellationCheck(t *testing.T) {
+	t.Helper()
+
+	page, transport := newR1ScriptedPage(true)
+	transport.abortRead = make(chan struct{})
+	transport.readEntered = make(chan struct{})
+	transport.closedSig = make(chan struct{})
+	t.Cleanup(func() { transport.releaseAbort() })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	transport.intercept = func(method string, raw json.RawMessage) (string, bool) {
+		if method == "Input.dispatchKeyEvent" && strings.Contains(string(raw), "rawKeyDown") {
+			return "BLOCK_READ", true
+		}
+		return "", false
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		done <- page.typeCredentialInto(ctx, nil, 7, loginUsernameSel, "X")
+	}()
+
+	watchdog := time.NewTimer(2 * time.Second)
+	defer watchdog.Stop()
+
+	select {
+	case <-transport.readEntered:
+	case <-watchdog.C:
+		transport.releaseAbort()
+		<-done
+		t.Fatalf("timed out waiting for Read to block in-flight")
+	}
+
+	cancel()
+
+	var err error
+	select {
+	case err = <-done:
+	case <-watchdog.C:
+		transport.releaseAbort()
+		<-done
+		t.Fatalf("cancellation did not interrupt blocked in-flight Read via SetDeadline/Close")
+	}
+
+	transport.mu.Lock()
+	interruptedByDeadline := transport.interruptedByDeadline
+	interruptedByClose := transport.interruptedByClose
+	closed := transport.closed
+	releasedByAbort := transport.releasedByAbort
+	transport.mu.Unlock()
+
+	if releasedByAbort {
+		t.Fatalf("in-flight Read was released by failure watchdog abort instead of forced transport interruption")
+	}
+	if !interruptedByDeadline || !interruptedByClose || !closed {
+		t.Fatalf("expected forced transport interruption before accepting result (interruptedByDeadline=%v, interruptedByClose=%v, closed=%v)",
+			interruptedByDeadline, interruptedByClose, closed)
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context.Canceled on mid-keyDown cancellation, got %v", err)
+	}
+	transport.chrome.mu.Lock()
+	keyCount := len(transport.chrome.keyEvents)
+	transport.chrome.mu.Unlock()
+	if keyCount != 1 {
+		t.Fatalf("expected cancellation during rawKeyDown to stop after 1 key event (before char/keyUp), got %d", keyCount)
+	}
+	if reuseErr := page.call("Page.enable", nil, nil); reuseErr == nil {
+		t.Fatalf("expected subsequent call on canceled/interrupted cdpConn to fail")
+	}
+
+	page2, transport2 := newR1ScriptedPage(true)
+	transport2.abortRead = make(chan struct{})
+	transport2.closedSig = make(chan struct{})
+	t.Cleanup(func() { transport2.releaseAbort() })
+
+	ctx2, cancel2 := context.WithCancel(context.Background())
+	defer cancel2()
+
+	transport2.pending.Write(encodeFakeWSFrame([]byte(`{"id":1,"result":{}}`)))
+	if _, peekErr := page2.reader.Peek(1); peekErr != nil {
+		t.Fatalf("failed to pre-buffer reply frame in page2.reader: %v", peekErr)
+	}
+
+	watchdog2 := time.NewTimer(2 * time.Second)
+	defer watchdog2.Stop()
+
+	transport2.intercept = func(method string, _ json.RawMessage) (string, bool) {
+		if method == "Input.dispatchKeyEvent" {
+			cancel2()
+			select {
+			case <-transport2.closedSig:
+			case <-watchdog2.C:
+				transport2.releaseAbort()
+				t.Errorf("timed out waiting for AfterFunc to interrupt/close transport")
+			}
+			return "NO_REPLY", true
+		}
+		return "", false
+	}
+
+	err2 := page2.callContext(ctx2, "Input.dispatchKeyEvent", map[string]any{"type": "rawKeyDown", "key": "X"}, nil)
+
+	transport2.mu.Lock()
+	interruptedByDeadline2 := transport2.interruptedByDeadline
+	interruptedByClose2 := transport2.interruptedByClose
+	closed2 := transport2.closed
+	releasedByAbort2 := transport2.releasedByAbort
+	transport2.mu.Unlock()
+
+	if releasedByAbort2 {
+		t.Fatalf("pre-buffered cancellation check was released by watchdog abort instead of forced transport interruption")
+	}
+	if !interruptedByDeadline2 || !interruptedByClose2 || !closed2 {
+		t.Fatalf("expected AfterFunc to force transport deadline+close on cancellation (interruptedByDeadline=%v, interruptedByClose=%v, closed=%v)",
+			interruptedByDeadline2, interruptedByClose2, closed2)
+	}
+	if !errors.Is(err2, context.Canceled) {
+		t.Fatalf("expected callContext to reject pre-buffered reply after forced transport interruption and return context.Canceled, got %v", err2)
+	}
+}
+
+func TestR2_1_CancellationRequiresForcedTransportInterruptionBeforeResult(t *testing.T) {
+	t0 := time.Date(2099, 1, 1, 12, 0, 0, 0, time.UTC)
+	withInjectedModelStudioClock(t, func() time.Time { return t0 })
+
+	oldSleep := loginSleep
+	loginSleep = func(ctx context.Context, _ time.Duration) error { return ctx.Err() }
+	t.Cleanup(func() { loginSleep = oldSleep })
+
+	runMidKeyDownCancellationCheck(t)
 }

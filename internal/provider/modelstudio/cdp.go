@@ -16,6 +16,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -371,6 +372,8 @@ type cdpConn struct {
 	reader          *bufio.Reader
 	nextID          int
 	redactedSecrets []string
+	baseDeadline    time.Time
+	ioBroken        bool
 }
 
 func dialCDP(ctx context.Context, port, path string) (*cdpConn, error) {
@@ -379,11 +382,13 @@ func dialCDP(ctx context.Context, port, path string) (*cdpConn, error) {
 	if err != nil {
 		return nil, err
 	}
+	var baseDeadline time.Time
 	if deadline, ok := ctx.Deadline(); ok {
-		_ = conn.SetDeadline(deadline)
+		baseDeadline = deadline
 	} else {
-		_ = conn.SetDeadline(time.Now().Add(cdpEndpointTimeout))
+		baseDeadline = modelStudioNow().Add(cdpEndpointTimeout)
 	}
+	_ = conn.SetDeadline(baseDeadline)
 
 	keyBytes := make([]byte, 16)
 	_, _ = rand.Read(keyBytes)
@@ -413,16 +418,73 @@ func dialCDP(ctx context.Context, port, path string) (*cdpConn, error) {
 		_ = conn.Close()
 		return nil, errors.New("invalid Sec-WebSocket-Accept")
 	}
-	return &cdpConn{conn: conn, reader: reader}, nil
+	return &cdpConn{conn: conn, reader: reader, baseDeadline: baseDeadline}, nil
 }
 
 func (c *cdpConn) Close() {
 	_ = c.conn.Close()
 }
 
+func (c *cdpConn) effectiveDeadline(ctx context.Context) time.Time {
+	effective := c.baseDeadline
+	if ctx != nil {
+		if dl, ok := ctx.Deadline(); ok {
+			if effective.IsZero() || dl.Before(effective) {
+				effective = dl
+			}
+		}
+	}
+	return effective
+}
+
 // call sends one command and decodes its "result" into out (which may be
 // nil). A DevTools error reply is returned as an error.
 func (c *cdpConn) call(method string, params any, out any) error {
+	return c.callContext(context.Background(), method, params, out)
+}
+
+func (c *cdpConn) callContext(ctx context.Context, method string, params any, out any) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if c.ioBroken {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return ctxErr
+		}
+		return errors.New("cdp connection closed after I/O error")
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if effective := c.effectiveDeadline(ctx); !effective.IsZero() {
+		_ = c.conn.SetDeadline(effective)
+	}
+
+	var cancelMu sync.Mutex
+	callDone := false
+	cancelDone := make(chan struct{})
+	var stopCancel func() bool
+	if ctx.Done() != nil {
+		stopCancel = context.AfterFunc(ctx, func() {
+			defer close(cancelDone)
+			cancelMu.Lock()
+			defer cancelMu.Unlock()
+			if !callDone {
+				c.ioBroken = true
+				_ = c.conn.SetDeadline(time.Unix(1, 0))
+				_ = c.conn.Close()
+			}
+		})
+	}
+	cleanupCancel := func() {
+		cancelMu.Lock()
+		callDone = true
+		cancelMu.Unlock()
+		if stopCancel != nil && !stopCancel() {
+			<-cancelDone
+		}
+	}
+
 	c.nextID++
 	id := c.nextID
 	msg := struct {
@@ -432,22 +494,46 @@ func (c *cdpConn) call(method string, params any, out any) error {
 	}{ID: id, Method: method, Params: params}
 	payload, err := json.Marshal(msg)
 	if err != nil {
+		cleanupCancel()
 		return err
 	}
 	if err := c.writeFrame(0x1, payload); err != nil {
+		cleanupCancel()
+		c.ioBroken = true
+		_ = c.conn.Close()
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return ctxErr
+		}
 		return err
 	}
 
 	for {
 		opcode, buf, err := c.readFrame()
 		if err != nil {
+			cleanupCancel()
+			c.ioBroken = true
+			_ = c.conn.Close()
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return ctxErr
+			}
 			return err
 		}
 		switch opcode {
 		case 0x8: // close
+			cleanupCancel()
+			c.ioBroken = true
+			_ = c.conn.Close()
 			return errors.New("cdp connection closed by browser")
 		case 0x9: // ping
-			_ = c.writeFrame(0xA, buf)
+			if err := c.writeFrame(0xA, buf); err != nil {
+				cleanupCancel()
+				c.ioBroken = true
+				_ = c.conn.Close()
+				if ctxErr := ctx.Err(); ctxErr != nil {
+					return ctxErr
+				}
+				return err
+			}
 			continue
 		case 0x1, 0x2:
 		default:
@@ -463,6 +549,13 @@ func (c *cdpConn) call(method string, params any, out any) error {
 		}
 		if err := json.Unmarshal(buf, &reply); err != nil || reply.ID != id {
 			continue
+		}
+		cleanupCancel()
+		if c.ioBroken {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return ctxErr
+			}
+			return errors.New("cdp connection closed after I/O error")
 		}
 		if reply.Error != nil {
 			return fmt.Errorf("%s: %s", method, reply.Error.Message)
