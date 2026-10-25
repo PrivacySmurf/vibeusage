@@ -216,6 +216,13 @@ func (s ProviderStatus) DisplayDescription() string {
 	return s.Level.StatusDescription()
 }
 
+type SessionInfo struct {
+	BornAt             time.Time `json:"born_at"`
+	AgeSeconds         int       `json:"age_seconds"`
+	MinLifetimeSeconds int       `json:"min_lifetime_seconds,omitempty"`
+	WarnSignInSoon     bool      `json:"warn_sign_in_soon,omitempty"`
+}
+
 type UsageSnapshot struct {
 	Provider         string            `json:"provider"`
 	FetchedAt        time.Time         `json:"fetched_at"`
@@ -225,6 +232,7 @@ type UsageSnapshot struct {
 	UsageLimitResets *UsageLimitResets `json:"usage_limit_resets,omitempty"`
 	Identity         *ProviderIdentity `json:"identity,omitempty"`
 	Status           *ProviderStatus   `json:"status,omitempty"`
+	Session          *SessionInfo      `json:"session,omitempty"`
 	Source           string            `json:"source,omitempty"`
 	DataAgeSeconds   int               `json:"data_age_seconds"`
 	Stale            bool              `json:"is_stale"`

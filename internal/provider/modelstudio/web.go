@@ -8,12 +8,14 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/joshuadavidthomas/vibeusage/internal/config"
 	"github.com/joshuadavidthomas/vibeusage/internal/fetch"
 	"github.com/joshuadavidthomas/vibeusage/internal/httpclient"
+	"github.com/joshuadavidthomas/vibeusage/internal/logging"
 	"github.com/joshuadavidthomas/vibeusage/internal/models"
 )
 
@@ -26,7 +28,17 @@ const (
 	subscriptionSummaryAction  = "GetSubscriptionSummary"
 	browserUserAgent           = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36"
 	modelStudioSessionCooldown = 30 * time.Minute
+	// modelStudioSessionWarnFraction is the fraction of the minimum observed
+	// session lifetime at which the panel warns to sign in soon. It is scaled
+	// to the minimum recorded lifetime — never a fabricated absolute TTL —
+	// because Alibaba Cloud invalidates console sessions server-side on an
+	// unpredictable schedule, so only observed lifetimes bound the next expiry.
+	modelStudioSessionWarnFraction = 0.75
+	sessionLifetimesFilename       = "modelstudio-session-lifetimes.json"
+	maxSessionLifetimes            = 10
 )
+
+var modelStudioNow = time.Now
 
 type WebConsoleStrategy struct {
 	HTTPTimeout    float64
@@ -68,14 +80,185 @@ func loadSessionCredential() (sessionCredentials, error) {
 		return sessionCredentials{}, err
 	}
 
-	var creds sessionCredentials
-	if err := json.Unmarshal(data, &creds); err == nil && creds.Cookie != "" {
+	var raw struct {
+		Cookie       string `json:"cookie"`
+		SecToken     string `json:"sec_token,omitempty"`
+		Source       string `json:"source,omitempty"`
+		BrowserLabel string `json:"browser,omitempty"`
+		UpdatedAt    string `json:"updated_at,omitempty"`
+	}
+	if err := json.Unmarshal(data, &raw); err == nil && raw.Cookie != "" {
+		creds := sessionCredentials{
+			Cookie:       raw.Cookie,
+			SecToken:     raw.SecToken,
+			Source:       raw.Source,
+			BrowserLabel: raw.BrowserLabel,
+		}
 		if creds.Source == "" {
 			creds.Source = sessionSourceManual
+		}
+		if strings.TrimSpace(raw.UpdatedAt) != "" {
+			var parsed time.Time
+			if err := parsed.UnmarshalText([]byte(strings.TrimSpace(raw.UpdatedAt))); err == nil {
+				creds.UpdatedAt = parsed
+			}
 		}
 		return creds, nil
 	}
 	return sessionCredentials{Cookie: string(data), Source: sessionSourceManual}, nil
+}
+
+type sessionLifetimeEntry struct {
+	BornAt          time.Time `json:"born_at"`
+	DiedAt          time.Time `json:"died_at"`
+	LifetimeSeconds int       `json:"lifetime_seconds"`
+	Source          string    `json:"source"`
+}
+
+func (e sessionLifetimeEntry) isValid() bool {
+	if e.BornAt.IsZero() || e.DiedAt.IsZero() || !e.DiedAt.After(e.BornAt) {
+		return false
+	}
+	computed := int(e.DiedAt.UTC().Sub(e.BornAt.UTC()).Seconds())
+	return computed > 0 && e.LifetimeSeconds == computed
+}
+
+func filterValidLifetimeEntries(entries []sessionLifetimeEntry) []sessionLifetimeEntry {
+	valid := make([]sessionLifetimeEntry, 0, len(entries))
+	for _, e := range entries {
+		if e.isValid() {
+			valid = append(valid, e)
+		}
+	}
+	return valid
+}
+
+type sessionLifetimeFile struct {
+	Entries []sessionLifetimeEntry `json:"entries"`
+}
+
+type sessionLifetimeStore struct {
+	path string
+}
+
+func defaultSessionLifetimeStore() sessionLifetimeStore {
+	return sessionLifetimeStore{
+		path: filepath.Join(config.DataDir(), sessionLifetimesFilename),
+	}
+}
+
+func (s sessionLifetimeStore) load() ([]sessionLifetimeEntry, error) {
+	data, err := os.ReadFile(s.path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	var file sessionLifetimeFile
+	if err := json.Unmarshal(data, &file); err != nil {
+		return nil, err
+	}
+	return file.Entries, nil
+}
+
+func (s sessionLifetimeStore) record(creds sessionCredentials, died time.Time) error {
+	if creds.Source == sessionSourceEnvironment {
+		return nil
+	}
+	if creds.UpdatedAt.IsZero() {
+		return nil
+	}
+	born := creds.UpdatedAt.UTC()
+	died = died.UTC()
+	lifetime := died.Sub(born)
+	if lifetime <= 0 {
+		return nil
+	}
+	entries, err := s.load()
+	if err != nil {
+		return err
+	}
+	entries = filterValidLifetimeEntries(entries)
+	for _, existing := range entries {
+		if existing.BornAt.Equal(born) {
+			return nil
+		}
+	}
+	source := creds.Source
+	if source == "" {
+		source = sessionSourceManual
+	}
+	entries = append(entries, sessionLifetimeEntry{
+		BornAt:          born,
+		DiedAt:          died,
+		LifetimeSeconds: int(lifetime.Seconds()),
+		Source:          source,
+	})
+	if len(entries) > maxSessionLifetimes {
+		entries = entries[len(entries)-maxSessionLifetimes:]
+	}
+	if err := os.MkdirAll(filepath.Dir(s.path), 0o700); err != nil {
+		return err
+	}
+	payload, err := json.Marshal(sessionLifetimeFile{Entries: entries})
+	if err != nil {
+		return err
+	}
+	if err := os.Chmod(s.path, 0o600); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return config.AtomicWriteFile(s.path, payload)
+}
+
+func (s sessionLifetimeStore) minLifetimeSeconds() int {
+	entries, err := s.load()
+	if err != nil {
+		return 0
+	}
+	entries = filterValidLifetimeEntries(entries)
+	if len(entries) == 0 {
+		return 0
+	}
+	minSec := 0
+	for _, e := range entries {
+		if minSec == 0 || e.LifetimeSeconds < minSec {
+			minSec = e.LifetimeSeconds
+		}
+	}
+	return minSec
+}
+
+func (s sessionLifetimeStore) evaluateSession(creds sessionCredentials, now time.Time) *models.SessionInfo {
+	if creds.Source == sessionSourceEnvironment || creds.UpdatedAt.IsZero() {
+		return nil
+	}
+	born := creds.UpdatedAt.UTC()
+	age := now.UTC().Sub(born)
+	if age < 0 {
+		age = 0
+	}
+	ageSec := int(age.Seconds())
+	minSec := s.minLifetimeSeconds()
+	warn := minSec > 0 && float64(ageSec) >= float64(minSec)*modelStudioSessionWarnFraction
+	return &models.SessionInfo{
+		BornAt:             born,
+		AgeSeconds:         ageSec,
+		MinLifetimeSeconds: minSec,
+		WarnSignInSoon:     warn,
+	}
+}
+
+// CurrentSessionInfoAt evaluates the current stored Model Studio session
+// against the durable lifetime ledger at the given timestamp. It returns
+// nil when credentials come from the environment, have no valid born-time,
+// or cannot be read.
+func CurrentSessionInfoAt(now time.Time) (*models.SessionInfo, error) {
+	creds, err := loadSessionCredential()
+	if err != nil {
+		return nil, err
+	}
+	return defaultSessionLifetimeStore().evaluateSession(creds, now), nil
 }
 
 func (s *WebConsoleStrategy) Fetch(ctx context.Context) (fetch.FetchResult, error) {
@@ -93,10 +276,14 @@ func (s *WebConsoleStrategy) Fetch(ctx context.Context) (fetch.FetchResult, erro
 	if err == nil {
 		// A stored or environment session that works is a real recovery.
 		clearLoginPark()
+		snapshot.Session = defaultSessionLifetimeStore().evaluateSession(creds, modelStudioNow())
 		return fetch.ResultOK(*snapshot), nil
 	}
 	if !errors.Is(err, errModelStudioSession) {
 		return fetch.ResultFail(fmt.Sprintf("Model Studio web console API failed: %v", err)), nil
+	}
+	if recErr := defaultSessionLifetimeStore().record(creds, modelStudioNow()); recErr != nil {
+		logging.FromContext(ctx).Warn("recording Model Studio session lifetime failed", "err", recErr)
 	}
 	if creds.Source == sessionSourceEnvironment {
 		return fetch.ResultFatal(modelStudioSessionHint(creds, errBrowserCookieImportUnavailable)), nil
@@ -183,11 +370,12 @@ func (s *WebConsoleStrategy) fetchImportedBrowserSession(
 			}
 		}
 
+		now := modelStudioNow()
 		creds := sessionCredentials{
 			Cookie:       imported.Cookie,
 			Source:       sessionSourceBrowser,
 			BrowserLabel: imported.SourceLabel,
-			UpdatedAt:    time.Now(),
+			UpdatedAt:    now,
 		}
 		snapshot, err := s.fetchWithSession(ctx, client, creds)
 		if err == nil {
@@ -199,6 +387,7 @@ func (s *WebConsoleStrategy) fetchImportedBrowserSession(
 					clearLoginPark()
 				}
 			}
+			snapshot.Session = defaultSessionLifetimeStore().evaluateSession(creds, now)
 			return fetch.ResultOK(*snapshot), nil
 		}
 		if !errors.Is(err, errModelStudioSession) {

@@ -67,7 +67,7 @@ func SnapshotToJSON(outcome fetch.FetchOutcome) any {
 			},
 		}
 	}
-	snap := *outcome.Snapshot
+	snap := refreshSnapshotSession(*outcome.Snapshot)
 	if snap.Overage != nil && !snap.Overage.IsEnabled {
 		snap.Overage = nil
 	}
@@ -85,7 +85,7 @@ func OutputMultiProviderJSON(w io.Writer, outcomes map[string]fetch.FetchOutcome
 
 	for pid, outcome := range outcomes {
 		if outcome.Success && outcome.Snapshot != nil {
-			snap := *outcome.Snapshot
+			snap := refreshSnapshotSession(*outcome.Snapshot)
 			if snap.Overage != nil && !snap.Overage.IsEnabled {
 				snap.Overage = nil
 			}

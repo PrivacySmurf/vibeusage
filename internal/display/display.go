@@ -2,6 +2,7 @@ package display
 
 import (
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -10,6 +11,7 @@ import (
 	"github.com/joshuadavidthomas/vibeusage/internal/models"
 	"github.com/joshuadavidthomas/vibeusage/internal/pace"
 	"github.com/joshuadavidthomas/vibeusage/internal/provider"
+	"github.com/joshuadavidthomas/vibeusage/internal/provider/modelstudio"
 )
 
 var (
@@ -427,6 +429,7 @@ type DetailOptions struct {
 // RenderSingleProvider renders a single provider in expanded detail format
 // with a provider title above a "Usage" panel, plus optional status info.
 func RenderSingleProvider(snapshot models.UsageSnapshot, cached bool, opts DetailOptions) string {
+	snapshot = refreshSnapshotSession(snapshot)
 	var out strings.Builder
 
 	// Provider title
@@ -586,6 +589,13 @@ func renderUsagePanel(snapshot models.UsageSnapshot) string {
 			b.WriteString("\n\n")
 		}
 		b.WriteString(bal)
+	}
+
+	if sessionBlock := formatSessionBlock(snapshot.Session); sessionBlock != "" {
+		if b.Len() > 0 {
+			b.WriteString("\n\n")
+		}
+		b.WriteString(sessionBlock)
 	}
 
 	return renderTitledPanel(titleStyle.Render("Usage"), "", b.String(), 0)
@@ -828,6 +838,7 @@ func buildPeriodTableWithOptions(rows []periodTableRow, opts periodTableOptions)
 // RenderProviderPanel renders a provider in compact panel format for multi-provider view.
 // Pass column widths from GlobalPeriodColWidths so all panels share identical column sizing.
 func RenderProviderPanel(snapshot models.UsageSnapshot, cached bool, cw PeriodColWidths) string {
+	snapshot = refreshSnapshotSession(snapshot)
 	var b strings.Builder
 
 	b.WriteString(renderPeriodTable(collectDisplayPeriods(snapshot), cw))
@@ -840,6 +851,13 @@ func RenderProviderPanel(snapshot models.UsageSnapshot, cached bool, cw PeriodCo
 			b.WriteByte('\n')
 		}
 		b.WriteString(bal)
+	}
+
+	if sessionBlock := formatSessionBlock(snapshot.Session); sessionBlock != "" {
+		if b.Len() > 0 {
+			b.WriteByte('\n')
+		}
+		b.WriteString(sessionBlock)
 	}
 
 	title := titleStyle.Render(provider.DisplayName(snapshot.Provider))
@@ -903,6 +921,56 @@ func formatAge(d time.Duration) string {
 		return fmt.Sprintf("%dm", int(d.Minutes()))
 	}
 	return "<1m"
+}
+
+var displayNow = func() time.Time {
+	if v := os.Getenv("VIBEUSAGE_TEST_NOW"); v != "" {
+		if parsed, err := time.Parse(time.RFC3339Nano, v); err == nil {
+			return parsed
+		}
+	}
+	return time.Now()
+}
+
+func refreshSnapshotSession(snapshot models.UsageSnapshot) models.UsageSnapshot {
+	if snapshot.Provider != "modelstudio" {
+		return snapshot
+	}
+	info, err := modelstudio.CurrentSessionInfoAt(displayNow())
+	if err != nil {
+		snapshot.Session = nil
+		return snapshot
+	}
+	snapshot.Session = info
+	return snapshot
+}
+
+func formatSessionBlock(session *models.SessionInfo) string {
+	if session == nil || session.BornAt.IsZero() {
+		return ""
+	}
+	age := time.Duration(max(0, session.AgeSeconds)) * time.Second
+	line := dimStyle.Render("Session age:") + " " + formatSessionAge(age)
+	if session.WarnSignInSoon {
+		line += "\n" + yellowStyle.Render("⚠ Session expiring — sign in soon")
+	}
+	return line
+}
+
+func formatSessionAge(d time.Duration) string {
+	totalMinutes := int(d.Minutes())
+	if totalMinutes <= 0 {
+		return "<1m"
+	}
+	hours := totalMinutes / 60
+	minutes := totalMinutes % 60
+	if hours > 0 {
+		if minutes > 0 {
+			return fmt.Sprintf("%dh %dm", hours, minutes)
+		}
+		return fmt.Sprintf("%dh", hours)
+	}
+	return fmt.Sprintf("%dm", minutes)
 }
 
 type longerPeriods struct {

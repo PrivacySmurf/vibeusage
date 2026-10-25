@@ -1,6 +1,10 @@
 package display
 
 import (
+	"bytes"
+	"encoding/json"
+	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
@@ -8,7 +12,10 @@ import (
 	"unicode/utf8"
 
 	"github.com/charmbracelet/lipgloss"
+	"github.com/joshuadavidthomas/vibeusage/internal/config"
+	"github.com/joshuadavidthomas/vibeusage/internal/fetch"
 	"github.com/joshuadavidthomas/vibeusage/internal/models"
+	"github.com/joshuadavidthomas/vibeusage/internal/testenv"
 )
 
 func timePtr(t time.Time) *time.Time { return &t }
@@ -1535,5 +1542,285 @@ func TestCollectDisplayPeriods_AggregatePreferred(t *testing.T) {
 	}
 	if result[0].Name != "Daily" {
 		t.Errorf("result[0].Name = %q, want %q", result[0].Name, "Daily")
+	}
+}
+
+func writeModelStudioDisplayTestCredential(t *testing.T, born time.Time, source string) {
+	t.Helper()
+	payload, err := json.Marshal(map[string]any{
+		"cookie":     "login_aliyunid_ticket=test-ticket; login_current_pk=account",
+		"source":     source,
+		"updated_at": born.UTC().Format(time.RFC3339Nano),
+	})
+	if err != nil {
+		t.Fatalf("json.Marshal(credential): %v", err)
+	}
+	if err := config.WriteCredential("modelstudio", "session", payload); err != nil {
+		t.Fatalf("WriteCredential: %v", err)
+	}
+}
+
+func writeModelStudioDisplayTestLifetime40h(t *testing.T) {
+	t.Helper()
+	lifetimePath := filepath.Join(config.DataDir(), "modelstudio-session-lifetimes.json")
+	if err := os.MkdirAll(filepath.Dir(lifetimePath), 0o700); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	raw := `{"entries":[{"born_at":"2026-10-05T00:00:00Z","died_at":"2026-10-06T16:00:00Z","lifetime_seconds":144000,"source":"browser"}]}`
+	if err := os.WriteFile(lifetimePath, []byte(raw), 0o600); err != nil {
+		t.Fatalf("WriteFile(lifetimes): %v", err)
+	}
+}
+
+func TestRenderProviderPanel_ModelStudioSessionAgeWithoutWarning(t *testing.T) {
+	testenv.ApplyVibeusage(t.Setenv, t.TempDir())
+	born := time.Date(2026, 10, 20, 10, 0, 0, 0, time.UTC)
+	now := born.Add(12*time.Hour + 30*time.Minute)
+	writeModelStudioDisplayTestCredential(t, born, "browser")
+	writeModelStudioDisplayTestLifetime40h(t)
+	t.Setenv("VIBEUSAGE_TEST_NOW", now.Format(time.RFC3339Nano))
+
+	snapshot := models.UsageSnapshot{
+		Provider:  "modelstudio",
+		FetchedAt: now,
+		Periods: []models.UsagePeriod{
+			{Name: "Monthly", Utilization: 25, PeriodType: models.PeriodMonthly},
+		},
+		Session: &models.SessionInfo{
+			BornAt:             born,
+			AgeSeconds:         int((12*time.Hour + 30*time.Minute).Seconds()),
+			MinLifetimeSeconds: int((40 * time.Hour).Seconds()),
+			WarnSignInSoon:     false,
+		},
+	}
+
+	cw := GlobalPeriodColWidths([]models.UsageSnapshot{snapshot})
+	out := RenderProviderPanel(snapshot, false, cw)
+
+	if !strings.Contains(out, "Session age: 12h 30m") {
+		t.Errorf("expected panel to show 'Session age: 12h 30m', got:\n%s", out)
+	}
+	if strings.Contains(out, "sign in soon") {
+		t.Errorf("did not expect warning in panel when WarnSignInSoon is false, got:\n%s", out)
+	}
+}
+
+func TestRenderProviderPanel_ModelStudioSessionAgeWithWarning(t *testing.T) {
+	testenv.ApplyVibeusage(t.Setenv, t.TempDir())
+	born := time.Date(2026, 10, 20, 10, 0, 0, 0, time.UTC)
+	now := born.Add(30 * time.Hour)
+	writeModelStudioDisplayTestCredential(t, born, "browser")
+	writeModelStudioDisplayTestLifetime40h(t)
+	t.Setenv("VIBEUSAGE_TEST_NOW", now.Format(time.RFC3339Nano))
+
+	snapshot := models.UsageSnapshot{
+		Provider:  "modelstudio",
+		FetchedAt: now,
+		Periods: []models.UsagePeriod{
+			{Name: "Monthly", Utilization: 25, PeriodType: models.PeriodMonthly},
+		},
+		Session: &models.SessionInfo{
+			BornAt:             born,
+			AgeSeconds:         int((30 * time.Hour).Seconds()),
+			MinLifetimeSeconds: int((40 * time.Hour).Seconds()),
+			WarnSignInSoon:     true,
+		},
+	}
+
+	cw := GlobalPeriodColWidths([]models.UsageSnapshot{snapshot})
+	out := RenderProviderPanel(snapshot, false, cw)
+
+	if !strings.Contains(out, "Session age: 30h") {
+		t.Errorf("expected panel to show 'Session age: 30h', got:\n%s", out)
+	}
+	if !strings.Contains(out, "sign in soon") {
+		t.Errorf("expected warning 'sign in soon' in panel when WarnSignInSoon is true, got:\n%s", out)
+	}
+}
+
+func TestRenderProviderPanel_RefreshesCachedModelStudioSession(t *testing.T) {
+	testenv.ApplyVibeusage(t.Setenv, t.TempDir())
+
+	born := time.Date(2026, 10, 20, 0, 0, 0, 0, time.UTC)
+	writeModelStudioDisplayTestCredential(t, born, "browser")
+	writeModelStudioDisplayTestLifetime40h(t)
+
+	// 1. Cached snapshot frozen at 29h59m without warning, displayed after crossing 30h threshold.
+	cachedSnap := models.UsageSnapshot{
+		Provider:  "modelstudio",
+		FetchedAt: born.Add(29*time.Hour + 59*time.Minute),
+		Periods: []models.UsagePeriod{
+			{Name: "Monthly", Utilization: 25, PeriodType: models.PeriodMonthly},
+		},
+		Session: &models.SessionInfo{
+			BornAt:             born,
+			AgeSeconds:         int((29*time.Hour + 59*time.Minute).Seconds()),
+			MinLifetimeSeconds: int((40 * time.Hour).Seconds()),
+			WarnSignInSoon:     false,
+		},
+	}
+	t.Setenv("VIBEUSAGE_TEST_NOW", born.Add(30*time.Hour).Format(time.RFC3339Nano))
+
+	cw := GlobalPeriodColWidths([]models.UsageSnapshot{cachedSnap})
+	panel := RenderProviderPanel(cachedSnap, true, cw)
+	if !strings.Contains(panel, "Session age: 30h") {
+		t.Errorf("expected cached panel at 30h to refresh to 'Session age: 30h', got:\n%s", panel)
+	}
+	if strings.Contains(panel, "29h 59m") {
+		t.Errorf("did not expect stale '29h 59m' in cached panel at 30h, got:\n%s", panel)
+	}
+	if !strings.Contains(panel, "sign in soon") {
+		t.Errorf("expected 'sign in soon' warning after crossing 30h on cached snapshot, got:\n%s", panel)
+	}
+
+	singleOut := RenderSingleProvider(cachedSnap, true, DetailOptions{})
+	if !strings.Contains(singleOut, "Session age: 30h") || !strings.Contains(singleOut, "sign in soon") {
+		t.Errorf("expected RenderSingleProvider to refresh session age (30h) and warning, got:\n%s", singleOut)
+	}
+
+	outcome := fetch.FetchOutcome{
+		ProviderID: "modelstudio",
+		Success:    true,
+		Cached:     true,
+		Snapshot:   &cachedSnap,
+	}
+	singleJSON, ok := SnapshotToJSON(outcome).(models.UsageSnapshot)
+	if !ok || singleJSON.Session == nil {
+		t.Fatalf("SnapshotToJSON(cached modelstudio) session = %+v", singleJSON.Session)
+	}
+	if singleJSON.Session.AgeSeconds != int((30*time.Hour).Seconds()) || !singleJSON.Session.WarnSignInSoon {
+		t.Errorf("SnapshotToJSON session = %+v, want AgeSeconds=108000 WarnSignInSoon=true", singleJSON.Session)
+	}
+
+	var multiBuf bytes.Buffer
+	if err := OutputMultiProviderJSON(&multiBuf, map[string]fetch.FetchOutcome{"modelstudio": outcome}); err != nil {
+		t.Fatalf("OutputMultiProviderJSON: %v", err)
+	}
+	var multiParsed struct {
+		Providers map[string]models.UsageSnapshot `json:"providers"`
+	}
+	if err := json.Unmarshal(multiBuf.Bytes(), &multiParsed); err != nil {
+		t.Fatalf("json.Unmarshal(multiBuf): %v", err)
+	}
+	multiSession := multiParsed.Providers["modelstudio"].Session
+	if multiSession == nil || multiSession.AgeSeconds != int((30*time.Hour).Seconds()) || !multiSession.WarnSignInSoon {
+		t.Errorf("OutputMultiProviderJSON session = %+v, want AgeSeconds=108000 WarnSignInSoon=true", multiSession)
+	}
+
+	// 2. First learned minimum on fallback: cached snapshot had MinLifetimeSeconds == 0,
+	// then a 40h lifetime exists on disk when evaluated at 31h.
+	cachedNoMin := cachedSnap
+	cachedNoMin.Session = &models.SessionInfo{
+		BornAt:             born,
+		AgeSeconds:         3600,
+		MinLifetimeSeconds: 0,
+		WarnSignInSoon:     false,
+	}
+	t.Setenv("VIBEUSAGE_TEST_NOW", born.Add(31*time.Hour).Format(time.RFC3339Nano))
+	panelLearned := RenderProviderPanel(cachedNoMin, true, cw)
+	if !strings.Contains(panelLearned, "Session age: 31h") || !strings.Contains(panelLearned, "sign in soon") {
+		t.Errorf("expected first learned minimum to show 'Session age: 31h' and warning, got:\n%s", panelLearned)
+	}
+
+	// 3. Changed stored generation: newer stored credential born2 at age 2h replaces stale 31h warning.
+	born2 := born.Add(29 * time.Hour)
+	writeModelStudioDisplayTestCredential(t, born2, "browser")
+	panelNewGen := RenderProviderPanel(cachedSnap, true, cw)
+	if !strings.Contains(panelNewGen, "Session age: 2h") {
+		t.Errorf("expected changed stored generation to show 'Session age: 2h', got:\n%s", panelNewGen)
+	}
+	if strings.Contains(panelNewGen, "sign in soon") {
+		t.Errorf("did not expect warning for 2h-old replacement generation, got:\n%s", panelNewGen)
+	}
+
+	// 4. Environment credential or unknown born-time clears stale cached Session.
+	t.Setenv("MODELSTUDIO_COOKIE", "login_aliyunid_ticket=env-override")
+	panelEnv := RenderProviderPanel(cachedSnap, true, cw)
+	if strings.Contains(panelEnv, "Session age:") || strings.Contains(panelEnv, "sign in soon") {
+		t.Errorf("expected environment credential to clear cached session display, got:\n%s", panelEnv)
+	}
+	t.Setenv("MODELSTUDIO_COOKIE", "")
+	if err := config.WriteCredential("modelstudio", "session", []byte(`{"cookie":"manual-no-ts","source":"manual"}`)); err != nil {
+		t.Fatalf("WriteCredential(no updated_at): %v", err)
+	}
+	panelNoBorn := RenderProviderPanel(cachedSnap, true, cw)
+	if strings.Contains(panelNoBorn, "Session age:") || strings.Contains(panelNoBorn, "sign in soon") {
+		t.Errorf("expected credential without born-time to clear cached session display, got:\n%s", panelNoBorn)
+	}
+}
+
+func TestRenderProviderPanel_NilSessionUntouchedAndJSONOmitsSession(t *testing.T) {
+	now := time.Date(2026, 10, 20, 12, 0, 0, 0, time.UTC)
+	snap := models.UsageSnapshot{
+		Provider:  "claude",
+		FetchedAt: now,
+		Periods: []models.UsagePeriod{
+			{Name: "Monthly", Utilization: 40, PeriodType: models.PeriodMonthly},
+		},
+		Session: nil,
+	}
+
+	cw := GlobalPeriodColWidths([]models.UsageSnapshot{snap})
+	panel := RenderProviderPanel(snap, false, cw)
+	if strings.Contains(panel, "Session age:") {
+		t.Errorf("did not expect 'Session age:' for non-ModelStudio provider with nil Session, got:\n%s", panel)
+	}
+	if strings.Contains(panel, "sign in soon") {
+		t.Errorf("did not expect 'sign in soon' for non-ModelStudio provider with nil Session, got:\n%s", panel)
+	}
+
+	rawSnap, err := json.Marshal(snap)
+	if err != nil {
+		t.Fatalf("json.Marshal(snap): %v", err)
+	}
+	if strings.Contains(string(rawSnap), `"session"`) {
+		t.Errorf("expected UsageSnapshot JSON to omit \"session\" when Session is nil, got: %s", string(rawSnap))
+	}
+	var snapMap map[string]any
+	if err := json.Unmarshal(rawSnap, &snapMap); err != nil {
+		t.Fatalf("json.Unmarshal(rawSnap): %v", err)
+	}
+	if _, hasSession := snapMap["session"]; hasSession {
+		t.Errorf("expected \"session\" key to be absent from UsageSnapshot map, got: %v", snapMap["session"])
+	}
+
+	outcome := fetch.FetchOutcome{
+		ProviderID: "claude",
+		Success:    true,
+		Snapshot:   &snap,
+	}
+	rawOutcome, err := json.Marshal(SnapshotToJSON(outcome))
+	if err != nil {
+		t.Fatalf("json.Marshal(SnapshotToJSON): %v", err)
+	}
+	if strings.Contains(string(rawOutcome), `"session"`) {
+		t.Errorf("expected SnapshotToJSON output to omit \"session\" when Session is nil, got: %s", string(rawOutcome))
+	}
+	var outcomeMap map[string]any
+	if err := json.Unmarshal(rawOutcome, &outcomeMap); err != nil {
+		t.Fatalf("json.Unmarshal(rawOutcome): %v", err)
+	}
+	if _, hasSession := outcomeMap["session"]; hasSession {
+		t.Errorf("expected \"session\" key to be absent from SnapshotToJSON map, got: %v", outcomeMap["session"])
+	}
+
+	born := time.Date(2026, 10, 20, 11, 0, 0, 0, time.UTC)
+	snapWithSession := snap
+	snapWithSession.Provider = "modelstudio"
+	snapWithSession.Session = &models.SessionInfo{
+		BornAt:         born,
+		AgeSeconds:     3600,
+		WarnSignInSoon: false,
+	}
+	rawWithSession, err := json.Marshal(snapWithSession)
+	if err != nil {
+		t.Fatalf("json.Marshal(snapWithSession): %v", err)
+	}
+	var withSessionMap map[string]any
+	if err := json.Unmarshal(rawWithSession, &withSessionMap); err != nil {
+		t.Fatalf("json.Unmarshal(rawWithSession): %v", err)
+	}
+	if _, hasSession := withSessionMap["session"]; !hasSession {
+		t.Errorf("expected \"session\" key to be present when Session != nil, got: %s", string(rawWithSession))
 	}
 }
