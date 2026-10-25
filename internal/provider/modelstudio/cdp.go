@@ -367,9 +367,10 @@ func listCDPPageTargets(ctx context.Context, port string) ([]cdpTarget, error) {
 // send commands and match their replies, without pulling in a WebSocket
 // dependency. Events are discarded.
 type cdpConn struct {
-	conn   net.Conn
-	reader *bufio.Reader
-	nextID int
+	conn            net.Conn
+	reader          *bufio.Reader
+	nextID          int
+	redactedSecrets []string
 }
 
 func dialCDP(ctx context.Context, port, path string) (*cdpConn, error) {

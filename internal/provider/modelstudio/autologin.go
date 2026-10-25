@@ -35,6 +35,7 @@ const (
 	loginPasswordSel  = "#fm-login-password"
 	loginSubmitSel    = "#fm-login-submit"
 	loginCheckcodeSel = "#fm-login-checkcode"
+	loginGetCodeSel   = "#J_GetCode, .send-btn, button.send-code, a.send-code"
 	loginCaptchaSel   = ".nc-container, #nc_1_n1z, .nc_wrapper"
 	// Alibaba's anti-bot layer ("TMD") injects the slider captcha as a nested
 	// iframe under this path; its presence is the reliable signal.
@@ -45,10 +46,13 @@ const (
 	// wants a code texted to the account's phone. It is not a slider.
 	verificationBlockedReason = "sign-in blocked by Alibaba account verification (SMS / account-protection code required); sign in manually once in this browser"
 	loginErrorSel             = ".fm-error, .error-message, .next-form-item-help"
+	assistedLoginEnv          = "VIBEUSAGE_MODELSTUDIO_ASSIST"
+	verificationCodeFilename  = "modelstudio-verification-code"
 	loginMaxAttempts          = 3
 	loginPollInterval         = 500 * time.Millisecond
 	loginCommandTimeout       = 30 * time.Second
 	loginOverallDeadline      = 90 * time.Second
+	loginDiagnosticsHeadroom  = 2 * time.Second
 	// loginCooldown is the minimum gap between automatic sign-in attempts,
 	// whatever their outcome. Repeated logins are what trip Alibaba's risk
 	// control (slider captcha), so a broken flow must fail quietly, not loop.
@@ -67,10 +71,11 @@ const (
 
 // Tunable so tests can run the retry path quickly.
 var (
-	loginFormWait     = 20 * time.Second
-	loginFormSettle   = 750 * time.Millisecond
-	loginRedirectWait = 15 * time.Second
-	loginCookieWait   = 15 * time.Second
+	loginFormWait         = 20 * time.Second
+	loginFormSettle       = 750 * time.Millisecond
+	loginRedirectWait     = 15 * time.Second
+	loginCookieWait       = 15 * time.Second
+	loginVerificationWait = loginOverallDeadline
 )
 
 var (
@@ -176,6 +181,14 @@ type loginBlockedError struct {
 }
 
 func (e *loginBlockedError) Error() string { return e.Reason }
+
+type attemptRedactedError struct {
+	cause error
+	text  string
+}
+
+func (e attemptRedactedError) Error() string { return e.text }
+func (e attemptRedactedError) Unwrap() error { return e.cause }
 
 // loginBlockerSignals is what the passport-frame probe observed.
 type loginBlockerSignals struct {
@@ -336,6 +349,133 @@ func clearLoginPark() {
 	}
 }
 
+func verificationCodePath() string {
+	return filepath.Join(config.DataDir(), verificationCodeFilename)
+}
+
+func assistedLoginEnabled() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(assistedLoginEnv))) {
+	case "1", "true":
+		return true
+	default:
+		return false
+	}
+}
+
+func validateVerificationCode(raw string) (string, error) {
+	code := strings.TrimSpace(raw)
+	if len(code) < 4 || len(code) > 8 {
+		return "", errors.New("verification code must be 4-8 digits")
+	}
+	for i := 0; i < len(code); i++ {
+		if code[i] < '0' || code[i] > '9' {
+			return "", errors.New("verification code must be 4-8 digits")
+		}
+	}
+	return code, nil
+}
+
+// DeliverVerificationCode validates a one-time SMS verification code and writes
+// it atomically with mode 0600 so an in-flight assisted Model Studio sign-in can
+// consume it exactly once. The code is never included in errors or logs.
+func DeliverVerificationCode(raw string) error {
+	code, err := validateVerificationCode(raw)
+	if err != nil {
+		return err
+	}
+	path := verificationCodePath()
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return fmt.Errorf("create verification code directory: %w", err)
+	}
+	tmp, err := os.CreateTemp(dir, ".modelstudio-code.tmp-*")
+	if err != nil {
+		return fmt.Errorf("create temporary verification code file: %w", err)
+	}
+	tmpPath := tmp.Name()
+	cleanupTmp := true
+	defer func() {
+		if cleanupTmp {
+			_ = tmp.Close()
+			_ = os.Remove(tmpPath)
+		}
+	}()
+	if err := os.Chmod(tmpPath, 0o600); err != nil {
+		return fmt.Errorf("chmod temporary verification code file: %w", err)
+	}
+	if _, err := tmp.WriteString(code); err != nil {
+		return fmt.Errorf("write verification code file: %w", err)
+	}
+	if err := tmp.Sync(); err != nil {
+		return fmt.Errorf("sync verification code file: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("close verification code file: %w", err)
+	}
+	if err := replaceVerificationCodeFile(tmpPath, path); err != nil {
+		return fmt.Errorf("install verification code file: %w", err)
+	}
+	cleanupTmp = false
+	_ = os.Chmod(path, 0o600)
+	return nil
+}
+
+// consumeVerificationCode atomically claims, reads, zeroes, and deletes the
+// one-use verification code file. Even if the file contains invalid bytes, it
+// is zeroed and removed on the first read attempt.
+func consumeVerificationCode() (string, bool) {
+	path := verificationCodePath()
+	info, err := os.Lstat(path)
+	if err != nil || !info.Mode().IsRegular() {
+		return "", false
+	}
+	claimPath := filepath.Join(
+		filepath.Dir(path),
+		fmt.Sprintf(".modelstudio-code.claim-%d-%d", os.Getpid(), time.Now().UnixNano()),
+	)
+	if err := replaceVerificationCodeFile(path, claimPath); err != nil {
+		return "", false
+	}
+	defer func() {
+		zeroSize := int(info.Size())
+		if zeroSize < 64 {
+			zeroSize = 64
+		}
+		if f, openErr := os.OpenFile(claimPath, os.O_WRONLY, 0o600); openErr == nil {
+			_, _ = f.Write(make([]byte, zeroSize))
+			_ = f.Sync()
+			_ = f.Close()
+		}
+		_ = os.Remove(claimPath)
+	}()
+
+	data, err := os.ReadFile(claimPath)
+	if err != nil {
+		return "", false
+	}
+	code, validErr := validateVerificationCode(string(data))
+	for i := range data {
+		data[i] = 0
+	}
+	if validErr != nil {
+		return "", false
+	}
+	if time.Since(info.ModTime()) > loginOverallDeadline {
+		return "", false
+	}
+	return code, true
+}
+
+func purgeStaleVerificationCode() {
+	info, err := os.Lstat(verificationCodePath())
+	if err != nil || !info.Mode().IsRegular() {
+		return
+	}
+	if info.Size() == 0 || time.Since(info.ModTime()) > loginOverallDeadline {
+		_, _ = consumeVerificationCode()
+	}
+}
+
 // loginGuidancePort names the headed-Chrome port an operator should sign in
 // on: login_port, else the first cdp_ports entry, else the literal setting
 // name so the message still tells them what to configure.
@@ -476,7 +616,7 @@ func firstNonEmpty(values map[string]string, keys ...string) string {
 // headed browser on port, fills the passport form, submits, waits for the
 // console redirect, and closes the tab. The browser's cookie jar keeps the
 // session, so a normal CDP import afterwards picks it up.
-func performModelStudioAutoLogin(ctx context.Context, port string, creds loginCredentials) (browserSession, error) {
+func performModelStudioAutoLogin(ctx context.Context, port string, creds loginCredentials) (session browserSession, err error) {
 	ctx, cancel := context.WithTimeout(ctx, loginOverallDeadline)
 	defer cancel()
 	logger := logging.FromContext(ctx).With("provider", "modelstudio", "step", "auto-login")
@@ -496,6 +636,19 @@ func performModelStudioAutoLogin(ctx context.Context, port string, creds loginCr
 		return browserSession{}, fmt.Errorf("attach to sign-in tab: %w", err)
 	}
 	defer page.Close()
+	page.rememberSecret(creds.Password)
+	defer func() {
+		if err != nil {
+			var blocked *loginBlockedError
+			if errors.As(err, &blocked) {
+				blocked.Reason = page.redactSecrets(blocked.Reason)
+			}
+			err = attemptRedactedError{
+				cause: err,
+				text:  page.redactSecrets(err.Error()),
+			}
+		}
+	}()
 
 	if err := page.call("Page.enable", nil, nil); err != nil {
 		return browserSession{}, err
@@ -514,11 +667,25 @@ func performModelStudioAutoLogin(ctx context.Context, port string, creds loginCr
 			// any credentials are typed; classify only now that the wait
 			// has failed so a normal sign-in page is never mistaken for one.
 			kind, reason := page.loginBlockerReason()
+			if kind == loginBlockerVerification && assistedLoginEnabled() {
+				session, assistErr := page.completeAssistedVerification(ctx, elapsed)
+				if assistErr == nil {
+					return session, nil
+				}
+				var assistBlocked *loginBlockedError
+				if errors.As(assistErr, &assistBlocked) {
+					assistBlocked.Reason = page.redactSecrets(assistBlocked.Reason)
+				}
+				diag := page.failureDiagnostics()
+				logger.Debug("sign-in form did not appear", "elapsed", elapsed(), "err", page.redactSecrets(assistErr.Error()), "blocker", string(kind),
+					"url", diag.URL, "frames", diag.Frames, "form_text", diag.FormText, "screenshot", diag.Screenshot)
+				return browserSession{}, fmt.Errorf("sign-in form did not appear: %w", assistErr)
+			}
 			diag := page.failureDiagnostics()
-			logger.Debug("sign-in form did not appear", "elapsed", elapsed(), "err", err, "blocker", string(kind),
+			logger.Debug("sign-in form did not appear", "elapsed", elapsed(), "err", page.redactSecrets(err.Error()), "blocker", string(kind),
 				"url", diag.URL, "frames", diag.Frames, "form_text", diag.FormText, "screenshot", diag.Screenshot)
 			if kind != "" {
-				return browserSession{}, fmt.Errorf("sign-in form did not appear: %w", &loginBlockedError{Kind: kind, Reason: reason})
+				return browserSession{}, fmt.Errorf("sign-in form did not appear: %w", &loginBlockedError{Kind: kind, Reason: page.redactSecrets(reason)})
 			}
 			return browserSession{}, fmt.Errorf("sign-in form did not appear: %w", err)
 		}
@@ -530,7 +697,7 @@ func performModelStudioAutoLogin(ctx context.Context, port string, creds loginCr
 			// A stale execution context means the frame reloaded under us;
 			// just go around and re-acquire it.
 			lastErr = err
-			logger.Debug("filling sign-in form failed", "attempt", attempt, "err", err)
+			logger.Debug("filling sign-in form failed", "attempt", attempt, "err", page.redactSecrets(err.Error()))
 			continue
 		}
 		logger.Debug("submitted sign-in form", "attempt", attempt, "elapsed", elapsed())
@@ -548,6 +715,15 @@ func performModelStudioAutoLogin(ctx context.Context, port string, creds loginCr
 			logger.Debug("signed in", "elapsed", elapsed())
 			return session, nil
 		}
+		var blocked *loginBlockedError
+		if errors.As(err, &blocked) && blocked.Kind == loginBlockerVerification && assistedLoginEnabled() {
+			session, assistErr := page.completeAssistedVerification(ctx, elapsed)
+			if assistErr == nil {
+				return session, nil
+			}
+			lastErr = assistErr
+			break
+		}
 		lastErr = err
 		if !errors.Is(err, errLoginNoRedirect) {
 			break
@@ -555,8 +731,16 @@ func performModelStudioAutoLogin(ctx context.Context, port string, creds loginCr
 		logger.Debug("no redirect after submit; retrying", "attempt", attempt, "elapsed", elapsed())
 	}
 
+	var lastBlocked *loginBlockedError
+	if errors.As(lastErr, &lastBlocked) {
+		lastBlocked.Reason = page.redactSecrets(lastBlocked.Reason)
+	}
 	diag := page.failureDiagnostics()
-	logger.Debug("sign-in did not complete", "elapsed", elapsed(), "err", lastErr,
+	errText := ""
+	if lastErr != nil {
+		errText = page.redactSecrets(lastErr.Error())
+	}
+	logger.Debug("sign-in did not complete", "elapsed", elapsed(), "err", errText,
 		"url", diag.URL, "frames", diag.Frames, "form_text", diag.FormText, "screenshot", diag.Screenshot)
 	if diag.FormText != "" {
 		return browserSession{}, fmt.Errorf("%w (sign-in page showed: %s)", lastErr, diag.FormText)
@@ -824,7 +1008,11 @@ func (c *cdpConn) captureSession(ctx context.Context, timeout time.Duration) (br
 		}
 
 		if time.Now().After(deadline) {
-			return browserSession{}, fmt.Errorf("%w within %s (last: %v)", errLoginNoSessionCookies, timeout, lastErr)
+			lastText := "<nil>"
+			if lastErr != nil {
+				lastText = c.redactSecrets(lastErr.Error())
+			}
+			return browserSession{}, fmt.Errorf("%w within %s (last: %s)", errLoginNoSessionCookies, timeout, lastText)
 		}
 		select {
 		case <-ctx.Done():
@@ -838,16 +1026,235 @@ func (c *cdpConn) captureSession(ctx context.Context, timeout time.Duration) (br
 // comment lets the test fake recognise it.
 const loginPageTextExpr = `(() => { /* vibeusage-page-text */ return (document.body && document.body.innerText || "").replace(/\s+/g, " ").trim().slice(0, 600); })()`
 
-// loginBlockerReason inspects the sign-in tab for an interactive blocker
-// (account verification or captcha) or a form error. It returns a zero
-// kind with an empty reason when nothing blocking is shown, and a zero kind
-// with a reason for a plain form error.
-func (c *cdpConn) loginBlockerReason() (loginBlockerKind, string) {
+const loginClickGetCodeExpr = `(() => { /* vibeusage-click-get-code */
+	const visible = el => !!el && el.getClientRects().length > 0 && getComputedStyle(el).visibility !== "hidden";
+	const direct = [...document.querySelectorAll(` + `"` + loginGetCodeSel + `"` + `)].find(visible);
+	if (direct) { direct.click(); return true; }
+	const candidates = [...document.querySelectorAll("button, a, input[type=button]")].filter(visible);
+	for (const el of candidates) {
+		const text = ((el.innerText || el.value || "").replace(/\s+/g, " ").trim()).toLowerCase();
+		if (text.includes("get code") || text.includes("send code") || text.includes("获取验证码")) {
+			el.click();
+			return true;
+		}
+	}
+	return false;
+})()`
+
+func (c *cdpConn) passportWorld() (int, error) {
 	var tree struct {
 		FrameTree cdpFrameTree `json:"frameTree"`
 	}
 	if err := c.call("Page.getFrameTree", nil, &tree); err != nil {
-		return "", ""
+		return 0, err
+	}
+	frame, ok := tree.FrameTree.find(passportFrameHost)
+	if !ok {
+		return 0, fmt.Errorf("no %s frame", passportFrameHost)
+	}
+	var world struct {
+		ExecutionContextID int `json:"executionContextId"`
+	}
+	if err := c.call("Page.createIsolatedWorld", map[string]any{"frameId": frame.ID, "worldName": "vibeusage"}, &world); err != nil {
+		return 0, err
+	}
+	return world.ExecutionContextID, nil
+}
+
+func (c *cdpConn) rememberSecret(secret string) {
+	if s := strings.TrimSpace(secret); s != "" {
+		c.redactedSecrets = append(c.redactedSecrets, s)
+	}
+	if secret != "" && secret != strings.TrimSpace(secret) {
+		c.redactedSecrets = append(c.redactedSecrets, secret)
+	}
+}
+
+func (c *cdpConn) redactSecrets(text string) string {
+	if text == "" {
+		return ""
+	}
+	out := text
+	for _, secret := range c.redactedSecrets {
+		if secret != "" {
+			out = strings.ReplaceAll(out, secret, "[REDACTED]")
+		}
+	}
+	return out
+}
+
+func boundedLoginWait(ctx context.Context, requested time.Duration) time.Duration {
+	wait := requested
+	if deadline, ok := ctx.Deadline(); ok {
+		remaining := time.Until(deadline)
+		headroom := loginDiagnosticsHeadroom
+		if maxHeadroom := remaining / 3; headroom > maxHeadroom {
+			headroom = maxHeadroom
+		}
+		if maxWait := remaining - headroom; maxWait < wait {
+			if maxWait < 0 {
+				maxWait = 0
+			}
+			wait = maxWait
+		}
+	}
+	return wait
+}
+
+// completeAssistedVerification clicks "Get code" at most once and waits up to
+// loginVerificationWait (bounded by ctx / loginOverallDeadline) for a one-use
+// verification code file delivered via DeliverVerificationCode.
+func (c *cdpConn) completeAssistedVerification(ctx context.Context, elapsed func() time.Duration) (browserSession, error) {
+	logger := logging.FromContext(ctx).With("provider", "modelstudio", "step", "auto-login")
+	waitCtx, cancel := context.WithTimeout(ctx, boundedLoginWait(ctx, loginVerificationWait))
+	defer cancel()
+	if waitCtx.Err() != nil {
+		return browserSession{}, &loginBlockedError{
+			Kind:   loginBlockerVerification,
+			Reason: verificationBlockedReason,
+		}
+	}
+	purgeStaleVerificationCode()
+
+	clickedGetCode := false
+	for {
+		if waitCtx.Err() != nil {
+			return browserSession{}, &loginBlockedError{
+				Kind:   loginBlockerVerification,
+				Reason: verificationBlockedReason,
+			}
+		}
+		if !clickedGetCode {
+			clickedGetCode = true
+			if worldID, err := c.passportWorld(); err == nil {
+				if waitCtx.Err() != nil {
+					return browserSession{}, &loginBlockedError{
+						Kind:   loginBlockerVerification,
+						Reason: verificationBlockedReason,
+					}
+				}
+				var clicked bool
+				_ = c.evalInContext(worldID, loginClickGetCodeExpr, &clicked)
+				logger.Debug("requested verification code", "clicked", clicked, "elapsed", elapsed())
+			}
+		}
+		if waitCtx.Err() != nil {
+			return browserSession{}, &loginBlockedError{
+				Kind:   loginBlockerVerification,
+				Reason: verificationBlockedReason,
+			}
+		}
+		if code, ok := consumeVerificationCode(); ok {
+			c.rememberSecret(code)
+			if waitCtx.Err() != nil {
+				return browserSession{}, &loginBlockedError{
+					Kind:   loginBlockerVerification,
+					Reason: verificationBlockedReason,
+				}
+			}
+			if err := c.submitVerificationCode(code); err != nil {
+				return browserSession{}, &loginBlockedError{
+					Kind:   loginBlockerVerification,
+					Reason: fmt.Sprintf("%s (%s)", verificationBlockedReason, c.redactSecrets(err.Error())),
+				}
+			}
+			logger.Debug("submitted assisted verification code", "elapsed", elapsed())
+			if err := c.waitForVerificationOutcome(ctx, loginRedirectWait); err != nil {
+				var blocked *loginBlockedError
+				if errors.As(err, &blocked) {
+					blocked.Reason = c.redactSecrets(blocked.Reason)
+				}
+				return browserSession{}, err
+			}
+			session, err := c.captureSession(ctx, loginCookieWait)
+			if err != nil {
+				return browserSession{}, err
+			}
+			logger.Debug("signed in after assisted verification", "elapsed", elapsed())
+			return session, nil
+		}
+
+		select {
+		case <-waitCtx.Done():
+			return browserSession{}, &loginBlockedError{
+				Kind:   loginBlockerVerification,
+				Reason: verificationBlockedReason,
+			}
+		case <-time.After(loginPollInterval):
+		}
+	}
+}
+
+func (c *cdpConn) submitVerificationCode(code string) error {
+	c.rememberSecret(code)
+	worldID, err := c.passportWorld()
+	if err != nil {
+		return err
+	}
+	if err := c.typeInto(worldID, loginCheckcodeSel, code); err != nil {
+		return fmt.Errorf("enter verification code: %w", err)
+	}
+	return c.evalInContext(worldID, "document.querySelector("+strconv.Quote(loginSubmitSel)+").click()", nil)
+}
+
+func (c *cdpConn) waitForVerificationOutcome(ctx context.Context, timeout time.Duration) error {
+	waitCtx, cancel := context.WithTimeout(ctx, boundedLoginWait(ctx, loginOverallDeadline))
+	defer cancel()
+	deadline := time.Now().Add(timeout)
+	consoleHost, _ := url.Parse(modelStudioConsoleBaseURL)
+	for {
+		if waitCtx.Err() != nil {
+			return &loginBlockedError{
+				Kind:   loginBlockerVerification,
+				Reason: verificationBlockedReason,
+			}
+		}
+		var href string
+		if err := c.evalInContext(0, "location.href", &href); err == nil {
+			if parsed, err := url.Parse(href); err == nil && parsed.Hostname() == consoleHost.Hostname() {
+				return nil
+			}
+		}
+
+		tmdFrame, signals, topText := c.readLoginBlockerSignals()
+		if signals.FormError != "" {
+			_, formReason := classifyLoginBlocker(false, loginBlockerSignals{FormError: signals.FormError}, "")
+			formReason = c.redactSecrets(formReason)
+			return &loginBlockedError{
+				Kind:   loginBlockerVerification,
+				Reason: verificationBlockedReason + " (" + formReason + ")",
+			}
+		}
+		if kind, reason := classifyLoginBlocker(tmdFrame, signals, topText); kind == loginBlockerCaptcha {
+			return &loginBlockedError{
+				Kind:   loginBlockerCaptcha,
+				Reason: c.redactSecrets(reason),
+			}
+		}
+
+		if time.Now().After(deadline) {
+			return &loginBlockedError{
+				Kind:   loginBlockerVerification,
+				Reason: verificationBlockedReason,
+			}
+		}
+		select {
+		case <-waitCtx.Done():
+			return &loginBlockedError{
+				Kind:   loginBlockerVerification,
+				Reason: verificationBlockedReason,
+			}
+		case <-time.After(loginPollInterval):
+		}
+	}
+}
+
+func (c *cdpConn) readLoginBlockerSignals() (bool, loginBlockerSignals, string) {
+	var tree struct {
+		FrameTree cdpFrameTree `json:"frameTree"`
+	}
+	if err := c.call("Page.getFrameTree", nil, &tree); err != nil {
+		return false, loginBlockerSignals{}, ""
 	}
 	tmdFrame := tree.FrameTree.any(func(f cdpFrame) bool { return strings.Contains(f.URL, loginCaptchaFramePath) })
 
@@ -877,6 +1284,15 @@ func (c *cdpConn) loginBlockerReason() (loginBlockerKind, string) {
 	var topText string
 	_ = c.evalInContext(0, loginPageTextExpr, &topText)
 
+	return tmdFrame, signals, topText
+}
+
+// loginBlockerReason inspects the sign-in tab for an interactive blocker
+// (account verification or captcha) or a form error. It returns a zero
+// kind with an empty reason when nothing blocking is shown, and a zero kind
+// with a reason for a plain form error.
+func (c *cdpConn) loginBlockerReason() (loginBlockerKind, string) {
+	tmdFrame, signals, topText := c.readLoginBlockerSignals()
 	return classifyLoginBlocker(tmdFrame, signals, topText)
 }
 
@@ -930,5 +1346,10 @@ func (c *cdpConn) failureDiagnostics() loginDiagnostics {
 			}
 		}
 	}
+	diag.URL = c.redactSecrets(diag.URL)
+	for i := range diag.Frames {
+		diag.Frames[i] = c.redactSecrets(diag.Frames[i])
+	}
+	diag.FormText = c.redactSecrets(diag.FormText)
 	return diag
 }

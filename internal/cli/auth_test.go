@@ -17,6 +17,7 @@ import (
 	"github.com/joshuadavidthomas/vibeusage/internal/fetch"
 	"github.com/joshuadavidthomas/vibeusage/internal/prompt"
 	"github.com/joshuadavidthomas/vibeusage/internal/provider"
+	"github.com/joshuadavidthomas/vibeusage/internal/provider/modelstudio"
 	"github.com/joshuadavidthomas/vibeusage/internal/testenv"
 )
 
@@ -999,5 +1000,165 @@ func TestAuthStatusJSON_UsesTypedStruct(t *testing.T) {
 	// Should have at least one provider entry
 	if len(result) == 0 {
 		t.Error("expected at least one provider in auth status")
+	}
+}
+
+func executeAuthCLI(t *testing.T, stdin string, cliArgs ...string) (string, error) {
+	t.Helper()
+	reset := func() {
+		for _, name := range []string{"code", "token", "status", "diagnose", "delete"} {
+			if f := authCmd.Flags().Lookup(name); f != nil {
+				_ = f.Value.Set(f.DefValue)
+				f.Changed = false
+			}
+		}
+		authCmd.SetIn(nil)
+	}
+	reset()
+	t.Cleanup(reset)
+
+	var buf bytes.Buffer
+	oldWriter := outWriter
+	outWriter = &buf
+	defer func() { outWriter = oldWriter }()
+
+	if stdin != "" {
+		authCmd.SetIn(strings.NewReader(stdin))
+	}
+	if err := authCmd.ParseFlags(cliArgs); err != nil {
+		return buf.String(), err
+	}
+	posArgs := authCmd.Flags().Args()
+	if authCmd.Args != nil {
+		if err := authCmd.Args(authCmd, posArgs); err != nil {
+			return buf.String(), err
+		}
+	}
+	err := authCmd.RunE(authCmd, posArgs)
+	return buf.String(), err
+}
+
+func TestAuthModelStudioCodeFlag(t *testing.T) {
+	tmp := t.TempDir()
+	testenv.ApplySameDir(t.Setenv, tmp)
+	config.Override(t, config.DefaultConfig())
+
+	t.Run("direct_flag_value", func(t *testing.T) {
+		outStr, err := executeAuthCLI(t, "", "modelstudio", "--code", "123456")
+		if err != nil {
+			t.Fatalf("executeAuthCLI error: %v", err)
+		}
+		if strings.Contains(outStr, "123456") {
+			t.Fatalf("output leaked verification code: %q", outStr)
+		}
+		codePath := filepath.Join(config.DataDir(), "modelstudio-verification-code")
+		data, err := os.ReadFile(codePath)
+		if err != nil || string(data) != "123456" {
+			t.Fatalf("code file = %q, err=%v", data, err)
+		}
+		info, err := os.Stat(codePath)
+		if err != nil || info.Mode().Perm() != 0o600 {
+			t.Fatalf("code file mode = %v, err=%v", info.Mode().Perm(), err)
+		}
+	})
+
+	t.Run("piped_stdin", func(t *testing.T) {
+		outStr, err := executeAuthCLI(t, "654321\n", "modelstudio", "--code", "-")
+		if err != nil {
+			t.Fatalf("executeAuthCLI stdin error: %v", err)
+		}
+		if strings.Contains(outStr, "654321") {
+			t.Fatalf("output leaked verification code: %q", outStr)
+		}
+		codePath := filepath.Join(config.DataDir(), "modelstudio-verification-code")
+		data, err := os.ReadFile(codePath)
+		if err != nil || string(data) != "654321" {
+			t.Fatalf("code file = %q, err=%v", data, err)
+		}
+	})
+
+	t.Run("rejects_other_provider_and_invalid_digits_without_echoing", func(t *testing.T) {
+		if _, err := executeAuthCLI(t, "", "openrouter", "--code", "888888"); err == nil || strings.Contains(err.Error(), "888888") {
+			t.Fatalf("expected non-echoing provider error, got %v", err)
+		}
+		if _, err := executeAuthCLI(t, "", "modelstudio", "--code", "bad-secret-code"); err == nil || strings.Contains(err.Error(), "bad-secret-code") {
+			t.Fatalf("expected non-echoing validation error, got %v", err)
+		}
+	})
+
+	_ = modelstudio.DeliverVerificationCode
+}
+
+func TestR1_3_AuthCodeFlagFirstNeverEchoesDigits(t *testing.T) {
+	tmp := t.TempDir()
+	testenv.ApplySameDir(t.Setenv, tmp)
+	config.Override(t, config.DefaultConfig())
+
+	t.Run("flag_first_modelstudio_delivers_without_echoing", func(t *testing.T) {
+		outStr, err := executeAuthCLI(t, "", "--code", "123456", "modelstudio")
+		if err != nil {
+			t.Fatalf("executeAuthCLI(--code 123456 modelstudio) error: %v", err)
+		}
+		if strings.Contains(outStr, "123456") {
+			t.Fatalf("output leaked verification code: %q", outStr)
+		}
+		codePath := filepath.Join(config.DataDir(), "modelstudio-verification-code")
+		data, readErr := os.ReadFile(codePath)
+		if readErr != nil || string(data) != "123456" {
+			t.Fatalf("code file = %q, err=%v", data, readErr)
+		}
+	})
+
+	for _, tc := range []struct {
+		name   string
+		secret string
+		args   []string
+	}{
+		{name: "flag_first_unsupported_provider", secret: "123456", args: []string{"--code", "123456", "openrouter"}},
+		{name: "provider_first_unsupported_provider", secret: "888888", args: []string{"openrouter", "--code", "888888"}},
+		{name: "digits_only_with_code_flag", secret: "777777", args: []string{"777777", "--code"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			outStr, err := executeAuthCLI(t, "", tc.args...)
+			if err == nil {
+				t.Fatalf("expected error for %v, got nil", tc.args)
+			}
+			if strings.Contains(err.Error(), tc.secret) || strings.Contains(outStr, tc.secret) {
+				t.Fatalf("secret %q leaked in error=%q or output=%q", tc.secret, err.Error(), outStr)
+			}
+		})
+	}
+}
+
+func TestR1_5_AuthCodeSpaceFormStdinThroughFlagParser(t *testing.T) {
+	tmp := t.TempDir()
+	testenv.ApplySameDir(t.Setenv, tmp)
+	config.Override(t, config.DefaultConfig())
+
+	for _, tc := range []struct {
+		name  string
+		stdin string
+		want  string
+		args  []string
+	}{
+		{name: "space_dash_form", stdin: "654321\n", want: "654321", args: []string{"modelstudio", "--code", "-"}},
+		{name: "flag_first_space_dash_form", stdin: "246810\n", want: "246810", args: []string{"--code", "-", "modelstudio"}},
+		{name: "equals_dash_form", stdin: "135790\n", want: "135790", args: []string{"modelstudio", "--code=-"}},
+		{name: "bare_flag_stdin_form", stdin: "112233\n", want: "112233", args: []string{"modelstudio", "--code"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			outStr, err := executeAuthCLI(t, tc.stdin, tc.args...)
+			if err != nil {
+				t.Fatalf("executeAuthCLI(%v) error: %v", tc.args, err)
+			}
+			if strings.Contains(outStr, tc.want) {
+				t.Fatalf("output leaked verification code %q: %q", tc.want, outStr)
+			}
+			codePath := filepath.Join(config.DataDir(), "modelstudio-verification-code")
+			data, readErr := os.ReadFile(codePath)
+			if readErr != nil || string(data) != tc.want {
+				t.Fatalf("code file = %q (want %q), err=%v", data, tc.want, readErr)
+			}
+		})
 	}
 }

@@ -2,6 +2,7 @@ package modelstudio
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/sha1"
 	"encoding/base64"
@@ -11,6 +12,9 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -18,6 +22,7 @@ import (
 	"time"
 
 	"github.com/joshuadavidthomas/vibeusage/internal/config"
+	"github.com/joshuadavidthomas/vibeusage/internal/logging"
 	"github.com/joshuadavidthomas/vibeusage/internal/testenv"
 )
 
@@ -277,6 +282,8 @@ func TestPerformModelStudioAutoLoginRetriesWhenFormIsWiped(t *testing.T) {
 }
 
 func TestPerformModelStudioAutoLoginDetectsCaptcha(t *testing.T) {
+	isolateParkFixture(t)
+	t.Setenv(assistedLoginEnv, "1")
 	chrome := newFakeLoginChrome(t)
 	chrome.captcha = true
 
@@ -290,12 +297,17 @@ func TestPerformModelStudioAutoLoginDetectsCaptcha(t *testing.T) {
 	}
 	chrome.mu.Lock()
 	defer chrome.mu.Unlock()
+	if chrome.getCodeClicks != 0 {
+		t.Errorf("captcha must never trigger assisted Get code click, got %d", chrome.getCodeClicks)
+	}
 	if chrome.closed != 1 {
 		t.Errorf("tab should be closed after failure, closed=%d", chrome.closed)
 	}
 }
 
 func TestPerformModelStudioAutoLoginDetectsVerification(t *testing.T) {
+	isolateParkFixture(t)
+	t.Setenv(assistedLoginEnv, "")
 	chrome := newFakeLoginChrome(t)
 	chrome.verification = true
 
@@ -312,6 +324,9 @@ func TestPerformModelStudioAutoLoginDetectsVerification(t *testing.T) {
 	}
 	chrome.mu.Lock()
 	defer chrome.mu.Unlock()
+	if chrome.getCodeClicks != 0 {
+		t.Errorf("unassisted verification must not click Get code, got %d", chrome.getCodeClicks)
+	}
 	if chrome.closed != 1 {
 		t.Errorf("tab should be closed after failure, closed=%d", chrome.closed)
 	}
@@ -454,18 +469,34 @@ type fakeLoginChrome struct {
 	initialVerification bool // account-protection page from the first poll, no form
 	initialTMD          bool // TMD punish frame in the tree from the first poll, no form
 	noForm              bool // the form never appears and nothing blocks
+	// Assisted verification state
+	getCodeClicks        int
+	onGetCodeClick       func()
+	checkcodeSubmitted   bool
+	rejectCheckcode      string
+	onAfterCodeProbe     func()
+	onBlockerProbe       func()
+	onPassportWorld      func()
+	storageGetCookiesErr error
 }
 
 // blocked reports whether the sign-in page ends in an interactive blocker.
 func (f *fakeLoginChrome) blocked() bool {
-	return f.captcha || f.captchaSel || f.verification || f.initialVerification || f.initialTMD
+	verificationBlocked := (f.verification || f.initialVerification) && (!f.checkcodeSubmitted || f.rejectCheckcode != "")
+	formErrorBlocked := !f.verification && !f.initialVerification && f.rejectCheckcode != ""
+	return f.captcha || f.captchaSel || verificationBlocked || formErrorBlocked || f.initialTMD
 }
 
 func newFakeLoginChrome(t *testing.T) *fakeLoginChrome {
 	t.Helper()
-	oldSettle, oldRedirect, oldCookieWait := loginFormSettle, loginRedirectWait, loginCookieWait
-	loginFormSettle, loginRedirectWait, loginCookieWait = 10*time.Millisecond, 300*time.Millisecond, 300*time.Millisecond
-	t.Cleanup(func() { loginFormSettle, loginRedirectWait, loginCookieWait = oldSettle, oldRedirect, oldCookieWait })
+	if os.Getenv("VIBEUSAGE_CACHE_DIR") == "" {
+		t.Setenv("VIBEUSAGE_CACHE_DIR", t.TempDir())
+	}
+	oldSettle, oldRedirect, oldCookieWait, oldVerifyWait := loginFormSettle, loginRedirectWait, loginCookieWait, loginVerificationWait
+	loginFormSettle, loginRedirectWait, loginCookieWait, loginVerificationWait = 10*time.Millisecond, 300*time.Millisecond, 300*time.Millisecond, 300*time.Millisecond
+	t.Cleanup(func() {
+		loginFormSettle, loginRedirectWait, loginCookieWait, loginVerificationWait = oldSettle, oldRedirect, oldCookieWait, oldVerifyWait
+	})
 	f := &fakeLoginChrome{values: map[string]string{}}
 	const wsPath = "/devtools/page/fake-login-tab"
 
@@ -523,20 +554,27 @@ func (f *fakeLoginChrome) serveWS(t *testing.T, w http.ResponseWriter, r *http.R
 		if err := json.Unmarshal(payload, &msg); err != nil {
 			continue
 		}
-		result := f.handle(msg.Method, msg.Params)
-		reply, _ := json.Marshal(map[string]any{"id": msg.ID, "result": result})
+		result, rpcErr := f.handle(msg.Method, msg.Params)
+		replyObj := map[string]any{"id": msg.ID, "result": result}
+		if rpcErr != nil {
+			replyObj = map[string]any{"id": msg.ID, "error": map[string]string{"message": rpcErr.Error()}}
+		}
+		reply, _ := json.Marshal(replyObj)
 		_, _ = rw.Write(encodeFakeWSFrame(reply))
 		_ = rw.Flush()
 	}
 }
 
-func (f *fakeLoginChrome) handle(method string, raw json.RawMessage) any {
+func (f *fakeLoginChrome) handle(method string, raw json.RawMessage) (any, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	switch method {
 	case "Page.enable":
-		return map[string]any{}
+		return map[string]any{}, nil
 	case "Storage.getCookies":
+		if f.storageGetCookiesErr != nil {
+			return nil, f.storageGetCookiesErr
+		}
 		// The session cookies land only after the sign-in succeeds.
 		cookies := []any{}
 		if f.submitted && !f.blocked() {
@@ -546,7 +584,7 @@ func (f *fakeLoginChrome) handle(method string, raw json.RawMessage) any {
 				})
 			}
 		}
-		return map[string]any{"cookies": cookies}
+		return map[string]any{"cookies": cookies}, nil
 	case "Page.getFrameTree":
 		passport := map[string]any{
 			"frame": map[string]string{"id": "passport", "url": "https://" + passportFrameHost + "/mini_login.htm"},
@@ -566,9 +604,15 @@ func (f *fakeLoginChrome) handle(method string, raw json.RawMessage) any {
 		return map[string]any{"frameTree": map[string]any{
 			"frame":       map[string]string{"id": "main", "url": alibabaLoginURL},
 			"childFrames": []any{passport},
-		}}
+		}}, nil
 	case "Page.createIsolatedWorld":
-		return map[string]any{"executionContextId": 7}
+		cb := f.onPassportWorld
+		if cb != nil {
+			f.mu.Unlock()
+			cb()
+			f.mu.Lock()
+		}
+		return map[string]any{"executionContextId": 7}, nil
 	case "Input.insertText":
 		var p struct {
 			Text string `json:"text"`
@@ -576,55 +620,69 @@ func (f *fakeLoginChrome) handle(method string, raw json.RawMessage) any {
 		_ = json.Unmarshal(raw, &p)
 		f.typed = append(f.typed, p.Text)
 		f.values[f.focused] = p.Text
-		return map[string]any{}
+		return map[string]any{}, nil
+	case "Page.captureScreenshot":
+		return map[string]any{"data": base64.StdEncoding.EncodeToString([]byte("fake-png-screenshot"))}, nil
 	case "Runtime.evaluate":
 		var p struct {
 			Expression string `json:"expression"`
 			ContextID  int    `json:"contextId"`
 		}
 		_ = json.Unmarshal(raw, &p)
-		return map[string]any{"result": map[string]any{"value": f.evaluate(p.Expression, p.ContextID)}}
+		val, cb := f.evaluate(p.Expression, p.ContextID)
+		if cb != nil {
+			f.mu.Unlock()
+			cb()
+			f.mu.Lock()
+		}
+		return map[string]any{"result": map[string]any{"value": val}}, nil
 	}
-	return map[string]any{}
+	return map[string]any{}, nil
 }
 
 // evaluate fakes just the expressions autologin.go emits.
-func (f *fakeLoginChrome) evaluate(expr string, contextID int) any {
+func (f *fakeLoginChrome) evaluate(expr string, contextID int) (any, func()) {
 	switch {
 	case expr == "location.href":
 		if f.submitted && !f.blocked() {
-			return modelStudioDashboardURL
+			return modelStudioDashboardURL, nil
 		}
-		return alibabaLoginURL
+		return alibabaLoginURL, nil
 	case strings.HasPrefix(expr, "document.readyState"):
 		// The form only exists in the passport world, and not at all when
 		// the page opened on a blocker.
-		return contextID == 7 && !f.initialVerification && !f.initialTMD && !f.noForm
+		return contextID == 7 && !f.initialVerification && !f.initialTMD && !f.noForm, nil
 	case strings.Contains(expr, "el.focus()"):
-		for _, sel := range []string{loginUsernameSel, loginPasswordSel} {
+		for _, sel := range []string{loginUsernameSel, loginPasswordSel, loginCheckcodeSel} {
 			if strings.Contains(expr, sel) {
 				f.focused = sel
-				return true
+				return true, nil
 			}
 		}
-		return false
+		return false, nil
 	case strings.HasSuffix(expr, ").value"):
 		for sel, value := range f.values {
 			if strings.Contains(expr, sel) {
-				return value
+				return value, nil
 			}
 		}
-		return ""
+		return "", nil
 	case strings.Contains(expr, loginSubmitSel) && strings.HasSuffix(expr, ".click()"):
 		f.submits++
 		if f.wipeFirstSubmit && f.submits == 1 {
 			// Mimic the real page: its late initialisation cleared what we
 			// typed, so the first submit goes out empty and nothing happens.
 			f.values = map[string]string{}
-			return nil
+			return nil, nil
+		}
+		if f.values[loginCheckcodeSel] != "" {
+			f.checkcodeSubmitted = true
 		}
 		f.submitted = true
-		return nil
+		return nil, nil
+	case strings.Contains(expr, "vibeusage-click-get-code"):
+		f.getCodeClicks++
+		return true, f.onGetCodeClick
 	case strings.Contains(expr, "vibeusage-login-probe"):
 		// The passport-frame probe returns raw signals; classification is
 		// the Go side's job. Nothing shows until the form was submitted.
@@ -637,12 +695,25 @@ func (f *fakeLoginChrome) evaluate(expr string, contextID int) any {
 			if f.captchaSel {
 				signals["captcha"] = true
 			}
+			if (f.checkcodeSubmitted || (!f.verification && !f.initialVerification)) && f.rejectCheckcode != "" {
+				signals["err"] = f.rejectCheckcode
+			}
 		}
-		return signals
+		if f.checkcodeSubmitted && f.onAfterCodeProbe != nil {
+			cb := f.onAfterCodeProbe
+			f.onAfterCodeProbe = nil
+			return signals, cb
+		}
+		return signals, f.onBlockerProbe
+	case strings.Contains(expr, "document.body.innerText") && strings.Contains(expr, "slice(0, 240)"):
+		if f.checkcodeSubmitted && f.rejectCheckcode != "" {
+			return "To protect your account, please complete the verification. " + f.rejectCheckcode, nil
+		}
+		return "", nil
 	case strings.Contains(expr, "vibeusage-page-text"):
-		return "" // the top-level page shows no copy; the passport frame carries it
+		return "", nil // the top-level page shows no copy; the passport frame carries it
 	}
-	return nil
+	return nil, nil
 }
 
 func TestWebConsoleFetchHonorsLoginCooldown(t *testing.T) {
@@ -690,5 +761,791 @@ func TestWebConsoleStrategyExtendsTimeoutOnlyWithAutoLogin(t *testing.T) {
 	useAutoLoginConfig(t)
 	if got := strategy.ExtendTimeout(30 * time.Second); got != 30*time.Second+loginOverallDeadline {
 		t.Errorf("configured: ExtendTimeout = %v", got)
+	}
+}
+
+func TestAssistedVerificationDeliverCodeCompletesSignIn(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		initial bool
+	}{
+		{name: "post_submit_verification", initial: false},
+		{name: "initial_verification_panel", initial: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			isolateParkFixture(t)
+			t.Setenv(assistedLoginEnv, "1")
+
+			chrome := newFakeLoginChrome(t)
+			loginVerificationWait = 1200 * time.Millisecond
+			if tc.initial {
+				chrome.initialVerification = true
+				oldFormWait := loginFormWait
+				loginFormWait = 20 * time.Millisecond
+				t.Cleanup(func() { loginFormWait = oldFormWait })
+			} else {
+				chrome.verification = true
+			}
+			var delivered atomic.Bool
+			chrome.onGetCodeClick = func() {
+				if delivered.CompareAndSwap(false, true) {
+					go func() {
+						time.Sleep(25 * time.Millisecond)
+						if err := DeliverVerificationCode("654321"); err != nil {
+							t.Errorf("DeliverVerificationCode: %v", err)
+						}
+					}()
+				}
+			}
+
+			port, err := strconv.Atoi(chrome.port)
+			if err != nil {
+				t.Fatal(err)
+			}
+			cfg := config.DefaultConfig()
+			cfg.Providers["modelstudio"] = config.ProviderConfig{
+				CDPPorts:     []int{port},
+				LoginPort:    port,
+				LoginCommand: `printf '{"username":"me@example.com","password":"s3cret"}'`,
+			}
+			config.SetGlobal(cfg)
+			t.Cleanup(func() { config.SetGlobal(config.DefaultConfig()) })
+
+			server := newModelStudioSessionServer(t, func(cookie string) string {
+				if strings.Contains(cookie, "login_aliyunid_ticket=ticket") {
+					return successfulSummaryPayload()
+				}
+				return expiredSessionPayload()
+			})
+			stubImporter(t, func(context.Context) (browserSession, error) {
+				return browserSession{}, fmt.Errorf("%w: no signed-in Alibaba Cloud session in Chrome", errBrowserCookieImportUnavailable)
+			})
+			stubAutoLogin(t, performModelStudioAutoLogin)
+
+			result, err := newTestStrategy(server.URL).Fetch(context.Background())
+			if err != nil {
+				t.Fatalf("Fetch() error: %v", err)
+			}
+			if !result.Success {
+				t.Fatalf("expected assisted sign-in to succeed, got %+v", result)
+			}
+
+			chrome.mu.Lock()
+			clicks := chrome.getCodeClicks
+			checkcodeSubmitted := chrome.checkcodeSubmitted
+			chrome.mu.Unlock()
+			if clicks != 1 {
+				t.Errorf("getCodeClicks = %d, want 1", clicks)
+			}
+			if !checkcodeSubmitted {
+				t.Error("expected checkcode to be submitted")
+			}
+
+			if _, statErr := os.Stat(verificationCodePath()); !errors.Is(statErr, os.ErrNotExist) {
+				t.Errorf("verification code file should be removed after consumption, statErr=%v", statErr)
+			}
+			if code, ok := consumeVerificationCode(); ok || code != "" {
+				t.Errorf("second consumeVerificationCode() = (%q, %v), want (\"\", false)", code, ok)
+			}
+
+			saved, readErr := config.ReadCredential("modelstudio", "session")
+			if readErr != nil || !strings.Contains(string(saved), "CDP auto-login") {
+				t.Errorf("expected cached session credential, got %q err=%v", saved, readErr)
+			}
+			if park, parked := loadLoginPark(); parked {
+				t.Errorf("expected login park to be cleared after assisted sign-in, got %+v", park)
+			}
+		})
+	}
+}
+
+func TestAssistedVerificationTimeoutParksByteForByte(t *testing.T) {
+	runScenario := func(t *testing.T, assist string) (string, bool, loginPark, []byte) {
+		t.Helper()
+		isolateParkFixture(t)
+		t.Setenv(assistedLoginEnv, assist)
+
+		chrome := newFakeLoginChrome(t)
+		chrome.verification = true
+		oldVerifyWait := loginVerificationWait
+		loginVerificationWait = loginOverallDeadline
+		t.Cleanup(func() { loginVerificationWait = oldVerifyWait })
+
+		port, err := strconv.Atoi(chrome.port)
+		if err != nil {
+			t.Fatal(err)
+		}
+		cfg := config.DefaultConfig()
+		cfg.Providers["modelstudio"] = config.ProviderConfig{
+			CDPPorts:     []int{port},
+			LoginPort:    port,
+			LoginCommand: `printf '{"username":"me@example.com","password":"s3cret"}'`,
+		}
+		config.SetGlobal(cfg)
+		t.Cleanup(func() { config.SetGlobal(config.DefaultConfig()) })
+
+		server := newModelStudioSessionServer(t, func(string) string { return expiredSessionPayload() })
+		stubImporter(t, func(context.Context) (browserSession, error) {
+			return browserSession{}, fmt.Errorf("%w: no signed-in Alibaba Cloud session in Chrome", errBrowserCookieImportUnavailable)
+		})
+		stubAutoLogin(t, performModelStudioAutoLogin)
+
+		ctx, cancel := context.WithTimeout(context.Background(), 240*time.Millisecond)
+		defer cancel()
+		res, err := newTestStrategy(server.URL).Fetch(ctx)
+		if err != nil {
+			t.Fatalf("Fetch() error: %v", err)
+		}
+		if res.Success || res.RetryAfter == nil || time.Until(*res.RetryAfter) <= 0 {
+			t.Fatalf("expected throttled result with %s cooldown, got %+v", modelStudioSessionCooldown, res)
+		}
+		if assist == "1" {
+			chrome.mu.Lock()
+			clicks := chrome.getCodeClicks
+			chrome.mu.Unlock()
+			if clicks != 1 {
+				t.Errorf("assisted getCodeClicks = %d, want 1", clicks)
+			}
+		}
+		park, parked := loadLoginPark()
+		if !parked {
+			t.Fatal("expected verification park marker to be written")
+		}
+		shotPath := filepath.Join(config.CacheDir(), "modelstudio-login-failure.png")
+		shotBytes, shotErr := os.ReadFile(shotPath)
+		if shotErr != nil || len(shotBytes) == 0 {
+			t.Fatalf("expected failure screenshot at %s, err=%v", shotPath, shotErr)
+		}
+		// Normalize ephemeral test port in error message so we can compare byte-for-byte.
+		normalizedErr := strings.ReplaceAll(res.Error, chrome.port, "9444")
+		return normalizedErr, res.Success, park, shotBytes
+	}
+
+	unassistedErr, unassistedOK, unassistedPark, unassistedShot := runScenario(t, "")
+	assistedErr, assistedOK, assistedPark, assistedShot := runScenario(t, "1")
+
+	if assistedOK != unassistedOK || assistedErr != unassistedErr {
+		t.Errorf("assisted Fetch result mismatch:\n got: %q\nwant: %q", assistedErr, unassistedErr)
+	}
+	if assistedPark.Kind != unassistedPark.Kind || assistedPark.Reason != unassistedPark.Reason {
+		t.Errorf("park mismatch: got (%q, %q), want (%q, %q)",
+			assistedPark.Kind, assistedPark.Reason, unassistedPark.Kind, unassistedPark.Reason)
+	}
+	if string(assistedShot) != string(unassistedShot) {
+		t.Errorf("screenshot mismatch: got %d bytes, want %d bytes", len(assistedShot), len(unassistedShot))
+	}
+}
+
+func TestAssistedVerificationRejectedCodeParksWithoutRetry(t *testing.T) {
+	isolateParkFixture(t)
+	t.Setenv(assistedLoginEnv, "1")
+
+	chrome := newFakeLoginChrome(t)
+	chrome.verification = true
+	chrome.rejectCheckcode = "Verification code 999999 is incorrect"
+	chrome.onGetCodeClick = func() {
+		if err := DeliverVerificationCode("999999"); err != nil {
+			t.Errorf("DeliverVerificationCode: %v", err)
+		}
+	}
+
+	port, err := strconv.Atoi(chrome.port)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.DefaultConfig()
+	cfg.Providers["modelstudio"] = config.ProviderConfig{
+		CDPPorts:     []int{port},
+		LoginPort:    port,
+		LoginCommand: `printf '{"username":"me@example.com","password":"s3cret"}'`,
+	}
+	config.SetGlobal(cfg)
+	t.Cleanup(func() { config.SetGlobal(config.DefaultConfig()) })
+
+	server := newModelStudioSessionServer(t, func(string) string { return expiredSessionPayload() })
+	stubImporter(t, func(context.Context) (browserSession, error) {
+		return browserSession{}, fmt.Errorf("%w: no signed-in Alibaba Cloud session in Chrome", errBrowserCookieImportUnavailable)
+	})
+	stubAutoLogin(t, performModelStudioAutoLogin)
+
+	var logBuf bytes.Buffer
+	logger := logging.NewLogger(&logBuf)
+	logging.Configure(logger, logging.Flags{Verbose: true, NoColor: true})
+	res, err := newTestStrategy(server.URL).Fetch(logging.WithLogger(context.Background(), logger))
+	if err != nil {
+		t.Fatalf("Fetch() error: %v", err)
+	}
+	if res.Success {
+		t.Fatalf("expected failure when verification code is rejected, got %+v", res)
+	}
+
+	chrome.mu.Lock()
+	clicks := chrome.getCodeClicks
+	submits := chrome.submits
+	chrome.mu.Unlock()
+	if clicks != 1 {
+		t.Errorf("getCodeClicks = %d, want 1 (must never request a second SMS)", clicks)
+	}
+	if submits != 2 {
+		t.Errorf("submits = %d, want 2 (1 password submit + 1 verification submit, no retry loop)", submits)
+	}
+
+	park, parked := loadLoginPark()
+	if !parked || park.Kind != loginBlockerVerification {
+		t.Fatalf("expected verification park, got parked=%v park=%+v", parked, park)
+	}
+	if !strings.Contains(park.Reason, "sign-in rejected") || !strings.Contains(park.Reason, "is incorrect") {
+		t.Errorf("expected park reason to surface panel error, got %q", park.Reason)
+	}
+	if strings.Contains(res.Error, "999999") || strings.Contains(logBuf.String(), "999999") || strings.Contains(park.Reason, "999999") {
+		t.Errorf("submitted code leaked into error=%q, logs=%q, or park=%q", res.Error, logBuf.String(), park.Reason)
+	}
+	shotPath := filepath.Join(config.CacheDir(), "modelstudio-login-failure.png")
+	if _, statErr := os.Stat(shotPath); statErr != nil {
+		t.Errorf("expected failure screenshot at %s, err=%v", shotPath, statErr)
+	}
+}
+
+func TestVerificationCodeFileOneUseAndPermissions(t *testing.T) {
+	isolateParkFixture(t)
+
+	for _, bad := range []string{"", "   ", "123", "123456789", "12ab56", "my-secret-code"} {
+		err := DeliverVerificationCode(bad)
+		if err == nil {
+			t.Fatalf("DeliverVerificationCode(%q) unexpectedly succeeded", bad)
+		}
+		if bad != "" && strings.TrimSpace(bad) != "" && strings.Contains(err.Error(), strings.TrimSpace(bad)) {
+			t.Fatalf("error %q leaked input %q", err.Error(), bad)
+		}
+	}
+
+	if err := DeliverVerificationCode(" 482910 \n"); err != nil {
+		t.Fatalf("DeliverVerificationCode valid: %v", err)
+	}
+	path := verificationCodePath()
+	info, err := os.Lstat(path)
+	if err != nil {
+		t.Fatalf("Lstat(%s): %v", path, err)
+	}
+	if !info.Mode().IsRegular() {
+		t.Fatalf("expected regular file, mode=%v", info.Mode())
+	}
+	if perm := info.Mode().Perm(); perm != 0o600 {
+		t.Errorf("permissions = %04o, want 0600", perm)
+	}
+
+	entries, err := os.ReadDir(filepath.Dir(path))
+	if err != nil {
+		t.Fatalf("ReadDir: %v", err)
+	}
+	for _, entry := range entries {
+		if strings.Contains(entry.Name(), "482910") {
+			t.Errorf("directory listing leaked code in filename: %s", entry.Name())
+		}
+		if entry.Name() != verificationCodeFilename {
+			t.Errorf("unexpected extra file in data dir: %s", entry.Name())
+		}
+	}
+
+	code, ok := consumeVerificationCode()
+	if !ok || code != "482910" {
+		t.Fatalf("first consumeVerificationCode() = (%q, %v), want (\"482910\", true)", code, ok)
+	}
+	if _, statErr := os.Lstat(path); !errors.Is(statErr, os.ErrNotExist) {
+		t.Errorf("code file still exists after consume: %v", statErr)
+	}
+	entriesAfter, _ := os.ReadDir(filepath.Dir(path))
+	if len(entriesAfter) != 0 {
+		t.Errorf("expected empty data dir after consume, got %d entries", len(entriesAfter))
+	}
+
+	if code2, ok2 := consumeVerificationCode(); ok2 || code2 != "" {
+		t.Errorf("second consumeVerificationCode() = (%q, %v), want (\"\", false)", code2, ok2)
+	}
+}
+
+func TestAssistedVerificationConcurrencyUnderLock(t *testing.T) {
+	isolateParkFixture(t)
+	t.Setenv(assistedLoginEnv, "1")
+
+	chrome := newFakeLoginChrome(t)
+	chrome.verification = true
+
+	port, err := strconv.Atoi(chrome.port)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.DefaultConfig()
+	cfg.Providers["modelstudio"] = config.ProviderConfig{
+		CDPPorts:     []int{port},
+		LoginPort:    port,
+		LoginCommand: `printf '{"username":"me@example.com","password":"s3cret"}'`,
+	}
+	config.SetGlobal(cfg)
+	t.Cleanup(func() { config.SetGlobal(config.DefaultConfig()) })
+
+	server := newModelStudioSessionServer(t, func(cookie string) string {
+		if strings.Contains(cookie, "login_aliyunid_ticket=ticket") {
+			return successfulSummaryPayload()
+		}
+		return expiredSessionPayload()
+	})
+	stubImporter(t, func(context.Context) (browserSession, error) {
+		return browserSession{}, fmt.Errorf("%w: no signed-in Alibaba Cloud session in Chrome", errBrowserCookieImportUnavailable)
+	})
+	stubAutoLogin(t, performModelStudioAutoLogin)
+
+	strategy := newTestStrategy(server.URL)
+	var secondErr error
+	chrome.onGetCodeClick = func() {
+		// A second concurrent call to autoLogin while the first is waiting inside
+		// completeAssistedVerification must hit the real login lock and return
+		// errAutoLoginInProgress immediately without opening a tab or clicking "Get code".
+		_, secondErr = strategy.autoLogin(context.Background())
+
+		if err := DeliverVerificationCode("135790"); err != nil {
+			t.Errorf("DeliverVerificationCode: %v", err)
+		}
+	}
+
+	res, err := strategy.Fetch(context.Background())
+	if err != nil || !res.Success {
+		t.Fatalf("first Fetch() = %+v, err=%v", res, err)
+	}
+	if !errors.Is(secondErr, errAutoLoginInProgress) {
+		t.Errorf("concurrent autoLogin err = %v, want %v", secondErr, errAutoLoginInProgress)
+	}
+
+	chrome.mu.Lock()
+	clicks := chrome.getCodeClicks
+	opened := chrome.opened
+	chrome.mu.Unlock()
+	if clicks != 1 || opened != 1 {
+		t.Errorf("clicks=%d opened=%d, want 1 and 1", clicks, opened)
+	}
+}
+
+func TestR1_1_StaleOrEmptyCodeFileDoesNotAuthorizeUnattendedSMS(t *testing.T) {
+	for _, envVal := range []string{"", "0", "false"} {
+		for _, tc := range []struct {
+			name    string
+			content string
+			aged    bool
+		}{
+			{name: "aged_valid_digits", content: "135790", aged: true},
+			{name: "fresh_valid_digits", content: "135790", aged: false},
+			{name: "aged_empty_file", content: "", aged: true},
+		} {
+			t.Run(fmt.Sprintf("env_%q_%s", envVal, tc.name), func(t *testing.T) {
+				isolateParkFixture(t)
+				t.Setenv(assistedLoginEnv, envVal)
+				if err := os.MkdirAll(config.DataDir(), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				codePath := verificationCodePath()
+				if err := os.WriteFile(codePath, []byte(tc.content), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				if tc.aged {
+					old := time.Unix(100000, 0)
+					if err := os.Chtimes(codePath, old, old); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if assistedLoginEnabled() {
+					t.Fatalf("assistedLoginEnabled() = true with %s=%q and file %s", assistedLoginEnv, envVal, tc.name)
+				}
+
+				chrome := newFakeLoginChrome(t)
+				chrome.verification = true
+				chrome.rejectCheckcode = "Code rejected"
+
+				_, err := performModelStudioAutoLogin(context.Background(), chrome.port, loginCredentials{Username: "me@example.com", Password: "s3cret"})
+				var blocked *loginBlockedError
+				if !errors.As(err, &blocked) || blocked.Kind != loginBlockerVerification {
+					t.Fatalf("expected verification blocker, got %v", err)
+				}
+				chrome.mu.Lock()
+				clicks := chrome.getCodeClicks
+				chrome.mu.Unlock()
+				if clicks != 0 {
+					t.Fatalf("unattended run with %s=%q (%s) triggered %d SMS Get-code clicks, want 0", assistedLoginEnv, envVal, tc.name, clicks)
+				}
+			})
+		}
+	}
+
+	t.Run("stale_file_rejected_by_consume_even_when_opted_in", func(t *testing.T) {
+		isolateParkFixture(t)
+		t.Setenv(assistedLoginEnv, "1")
+		if err := DeliverVerificationCode("135790"); err != nil {
+			t.Fatal(err)
+		}
+		staleTime := time.Now().Add(-2 * loginOverallDeadline)
+		if err := os.Chtimes(verificationCodePath(), staleTime, staleTime); err != nil {
+			t.Fatal(err)
+		}
+		if code, ok := consumeVerificationCode(); ok || code != "" {
+			t.Fatalf("consumeVerificationCode() accepted stale file: (%q, %v), want (\"\", false)", code, ok)
+		}
+		if _, err := os.Lstat(verificationCodePath()); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("expected stale verification code file to be removed, stat err=%v", err)
+		}
+	})
+}
+
+func TestR1_2_RejectedPanelTextRedactsSubmittedCodeAcrossAllSinks(t *testing.T) {
+	const secretCode = "246802"
+	const secretPassword = "s3cret-password-991"
+
+	for _, tc := range []struct {
+		name    string
+		initial bool
+	}{
+		{name: "post_submit_verification", initial: false},
+		{name: "initial_verification_panel", initial: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			isolateParkFixture(t)
+			t.Setenv(assistedLoginEnv, "1")
+
+			chrome := newFakeLoginChrome(t)
+			if tc.initial {
+				chrome.initialVerification = true
+				oldFormWait := loginFormWait
+				loginFormWait = 20 * time.Millisecond
+				t.Cleanup(func() { loginFormWait = oldFormWait })
+			} else {
+				chrome.verification = true
+			}
+			chrome.rejectCheckcode = "Verification code " + secretCode + " and password " + secretPassword + " rejected"
+			chrome.onGetCodeClick = func() {
+				if err := DeliverVerificationCode(secretCode); err != nil {
+					t.Errorf("DeliverVerificationCode: %v", err)
+				}
+			}
+
+			var logBuf bytes.Buffer
+			logger := logging.NewLogger(&logBuf)
+			logging.Configure(logger, logging.Flags{Verbose: true, NoColor: true})
+			ctx := logging.WithLogger(context.Background(), logger)
+
+			_, err := performModelStudioAutoLogin(ctx, chrome.port, loginCredentials{Username: "me@example.com", Password: secretPassword})
+			if err == nil {
+				t.Fatal("expected error when verification code is rejected")
+			}
+			var blocked *loginBlockedError
+			if !errors.As(err, &blocked) || blocked.Kind != loginBlockerVerification {
+				t.Fatalf("expected verification *loginBlockedError, got %T: %v", err, err)
+			}
+			if writeErr := writeLoginPark(blocked.Kind, blocked.Reason, time.Now()); writeErr != nil {
+				t.Fatal(writeErr)
+			}
+			parkRaw, readErr := os.ReadFile(loginParkMarker())
+			if readErr != nil {
+				t.Fatal(readErr)
+			}
+
+			for _, secret := range []string{secretCode, secretPassword} {
+				if strings.Contains(err.Error(), secret) {
+					t.Errorf("returned error leaked secret %q: %s", secret, err.Error())
+				}
+				if strings.Contains(logBuf.String(), secret) {
+					t.Errorf("verbose log leaked secret %q: %s", secret, logBuf.String())
+				}
+				if strings.Contains(string(parkRaw), secret) {
+					t.Errorf("persisted login park leaked secret %q: %s", secret, string(parkRaw))
+				}
+			}
+			if !strings.Contains(err.Error(), "[REDACTED]") {
+				t.Errorf("expected [REDACTED] in returned error, got %q", err.Error())
+			}
+			if !strings.Contains(blocked.Reason, "sign-in rejected") {
+				t.Errorf("expected preserved rejection reason prefix, got %q", blocked.Reason)
+			}
+		})
+	}
+
+	for _, tc := range []struct {
+		name     string
+		initial  bool
+		assisted bool
+	}{
+		{name: "post_submit_capture_error", initial: false, assisted: true},
+		{name: "initial_panel_capture_error", initial: true, assisted: true},
+		{name: "normal_post_submit_capture_error", initial: false, assisted: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			isolateParkFixture(t)
+			if tc.assisted {
+				t.Setenv(assistedLoginEnv, "1")
+			}
+
+			chrome := newFakeLoginChrome(t)
+			oldCookieWait := loginCookieWait
+			loginCookieWait = 10 * time.Millisecond
+			t.Cleanup(func() { loginCookieWait = oldCookieWait })
+
+			if tc.assisted {
+				if tc.initial {
+					chrome.initialVerification = true
+					oldFormWait := loginFormWait
+					loginFormWait = 20 * time.Millisecond
+					t.Cleanup(func() { loginFormWait = oldFormWait })
+				} else {
+					chrome.verification = true
+				}
+				chrome.onGetCodeClick = func() {
+					if err := DeliverVerificationCode(secretCode); err != nil {
+						t.Errorf("DeliverVerificationCode: %v", err)
+					}
+				}
+			}
+			chrome.storageGetCookiesErr = fmt.Errorf("cookie capture failed after code=%s pass=%s", secretCode, secretPassword)
+
+			var logBuf bytes.Buffer
+			logger := logging.NewLogger(&logBuf)
+			logging.Configure(logger, logging.Flags{Verbose: true, NoColor: true})
+			ctx := logging.WithLogger(context.Background(), logger)
+
+			_, err := performModelStudioAutoLogin(ctx, chrome.port, loginCredentials{Username: "me@example.com", Password: secretPassword})
+			if err == nil {
+				t.Fatal("expected cookie capture error")
+			}
+			if !errors.Is(err, errLoginNoSessionCookies) {
+				t.Fatalf("expected errors.Is(err, errLoginNoSessionCookies) == true, got %T: %v", err, err)
+			}
+			secrets := []string{secretPassword}
+			if tc.assisted {
+				secrets = append(secrets, secretCode)
+			}
+			for _, secret := range secrets {
+				if strings.Contains(err.Error(), secret) {
+					t.Errorf("returned capture error leaked secret %q: %s", secret, err.Error())
+				}
+				if strings.Contains(logBuf.String(), secret) {
+					t.Errorf("verbose log leaked secret %q: %s", secret, logBuf.String())
+				}
+			}
+			if !strings.Contains(err.Error(), "[REDACTED]") {
+				t.Errorf("expected [REDACTED] in returned capture error, got %q", err.Error())
+			}
+
+			// Also verify through WebConsoleStrategy.Fetch.
+			clearLoginPark()
+			recordLoginAttempt(time.Now().Add(-loginCooldown - time.Minute))
+			chrome.mu.Lock()
+			chrome.getCodeClicks = 0
+			chrome.submitted = false
+			chrome.checkcodeSubmitted = false
+			chrome.values = map[string]string{}
+			chrome.mu.Unlock()
+
+			port, convErr := strconv.Atoi(chrome.port)
+			if convErr != nil {
+				t.Fatal(convErr)
+			}
+			cfg := config.DefaultConfig()
+			cfg.Providers["modelstudio"] = config.ProviderConfig{
+				CDPPorts:     []int{port},
+				LoginPort:    port,
+				LoginCommand: fmt.Sprintf(`printf '{"username":"me@example.com","password":%q}'`, secretPassword),
+			}
+			config.SetGlobal(cfg)
+			t.Cleanup(func() { config.SetGlobal(config.DefaultConfig()) })
+
+			server := newModelStudioSessionServer(t, func(string) string {
+				return expiredSessionPayload()
+			})
+			stubImporter(t, func(context.Context) (browserSession, error) {
+				return browserSession{}, fmt.Errorf("%w: no signed-in Alibaba Cloud session in Chrome", errBrowserCookieImportUnavailable)
+			})
+			stubAutoLogin(t, performModelStudioAutoLogin)
+
+			fetchOut, fetchErr := newTestStrategy(server.URL).Fetch(ctx)
+			if fetchErr != nil {
+				t.Fatalf("Fetch returned unexpected error: %v", fetchErr)
+			}
+			for _, secret := range secrets {
+				if strings.Contains(fetchOut.Error, secret) {
+					t.Errorf("Fetch outcome leaked secret %q: %s", secret, fetchOut.Error)
+				}
+				if strings.Contains(logBuf.String(), secret) {
+					t.Errorf("verbose log after Fetch leaked secret %q: %s", secret, logBuf.String())
+				}
+			}
+			if !strings.Contains(fetchOut.Error, "[REDACTED]") {
+				t.Errorf("expected [REDACTED] in Fetch outcome error, got %q", fetchOut.Error)
+			}
+		})
+	}
+
+	t.Run("return_boundary_untyped_form_error", func(t *testing.T) {
+		isolateParkFixture(t)
+		chrome := newFakeLoginChrome(t)
+		chrome.rejectCheckcode = "Password " + secretPassword + " was rejected by passport"
+
+		var logBuf bytes.Buffer
+		logger := logging.NewLogger(&logBuf)
+		logging.Configure(logger, logging.Flags{Verbose: true, NoColor: true})
+		ctx := logging.WithLogger(context.Background(), logger)
+
+		_, err := performModelStudioAutoLogin(ctx, chrome.port, loginCredentials{Username: "me@example.com", Password: secretPassword})
+		if err == nil {
+			t.Fatal("expected error from untyped form rejection")
+		}
+		if strings.Contains(err.Error(), secretPassword) {
+			t.Errorf("return boundary leaked password %q: %s", secretPassword, err.Error())
+		}
+		if strings.Contains(logBuf.String(), secretPassword) {
+			t.Errorf("verbose log leaked password %q: %s", secretPassword, logBuf.String())
+		}
+		if !strings.Contains(err.Error(), "[REDACTED]") {
+			t.Errorf("expected [REDACTED] in returned error, got %q", err.Error())
+		}
+	})
+}
+
+func TestR2_R1_2_CaptureSessionErrorRedactsSecretsAndPreservesUnwrap(t *testing.T) {
+	TestR1_2_RejectedPanelTextRedactsSubmittedCodeAcrossAllSinks(t)
+}
+
+func TestR2_1_CanceledParentBeforeGetCodeNeverRequestsSMS(t *testing.T) {
+	for _, tc := range []struct {
+		name             string
+		initial          bool
+		cancelAfterWorld bool
+	}{
+		{name: "initial_panel_canceled_on_blocker_probe", initial: true, cancelAfterWorld: false},
+		{name: "post_submit_canceled_on_blocker_probe", initial: false, cancelAfterWorld: false},
+		{name: "canceled_after_passport_world_before_get_code_eval", initial: false, cancelAfterWorld: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			isolateParkFixture(t)
+			t.Setenv(assistedLoginEnv, "1")
+
+			if !tc.cancelAfterWorld {
+				if err := DeliverVerificationCode("135790"); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			chrome := newFakeLoginChrome(t)
+			if tc.initial {
+				chrome.initialVerification = true
+				oldFormWait := loginFormWait
+				loginFormWait = 15 * time.Millisecond
+				t.Cleanup(func() { loginFormWait = oldFormWait })
+			} else {
+				chrome.verification = true
+			}
+
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+
+			if tc.cancelAfterWorld {
+				chrome.onBlockerProbe = func() {
+					chrome.mu.Lock()
+					chrome.onPassportWorld = cancel
+					chrome.mu.Unlock()
+				}
+			} else {
+				chrome.onBlockerProbe = cancel
+			}
+
+			_, err := performModelStudioAutoLogin(ctx, chrome.port, loginCredentials{Username: "me@example.com", Password: "s3cret"})
+
+			chrome.mu.Lock()
+			clicks := chrome.getCodeClicks
+			checkcodeSubmitted := chrome.checkcodeSubmitted
+			chrome.mu.Unlock()
+			if clicks != 0 {
+				t.Errorf("getCodeClicks = %d, want 0 when parent ctx is canceled before Get code", clicks)
+			}
+			if checkcodeSubmitted {
+				t.Error("expected no verification code submission after parent ctx cancellation")
+			}
+
+			if !tc.cancelAfterWorld {
+				raw, statErr := os.ReadFile(verificationCodePath())
+				if statErr != nil || string(raw) != "135790" {
+					t.Errorf("expected pre-staged code file to remain untouched when canceled before purge/get-code, got content=%q err=%v", string(raw), statErr)
+				}
+			}
+
+			if err == nil {
+				t.Fatal("expected error when parent context is canceled before Get code")
+			}
+			var blocked *loginBlockedError
+			if !errors.As(err, &blocked) || blocked.Kind != loginBlockerVerification {
+				t.Fatalf("expected *loginBlockedError with Kind=%q, got %T: %v", loginBlockerVerification, err, err)
+			}
+			if blocked.Reason != verificationBlockedReason {
+				t.Errorf("blocked.Reason = %q, want %q", blocked.Reason, verificationBlockedReason)
+			}
+		})
+	}
+}
+
+func TestR2_1_CanceledParentBeforeAssistedGetCodeNeverClicks(t *testing.T) {
+	TestR2_1_CanceledParentBeforeGetCodeNeverRequestsSMS(t)
+}
+
+func TestR1_4_AssistedVerificationRealParentDeadlineCapturesScreenshot(t *testing.T) {
+	isolateParkFixture(t)
+	t.Setenv(assistedLoginEnv, "1")
+
+	chrome := newFakeLoginChrome(t)
+	chrome.verification = true
+	oldVerifyWait := loginVerificationWait
+	loginVerificationWait = loginOverallDeadline
+	t.Cleanup(func() { loginVerificationWait = oldVerifyWait })
+
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Millisecond)
+	defer cancel()
+
+	_, err := performModelStudioAutoLogin(ctx, chrome.port, loginCredentials{Username: "me@example.com", Password: "s3cret"})
+	var blocked *loginBlockedError
+	if !errors.As(err, &blocked) || blocked.Kind != loginBlockerVerification {
+		t.Fatalf("expected verification blocker on timeout, got %v", err)
+	}
+	shotPath := filepath.Join(config.CacheDir(), "modelstudio-login-failure.png")
+	shotBytes, shotErr := os.ReadFile(shotPath)
+	if shotErr != nil || len(shotBytes) == 0 {
+		t.Fatalf("real parent deadline expiration did not capture failure screenshot at %s: err=%v len=%d", shotPath, shotErr, len(shotBytes))
+	}
+}
+
+func TestR1_6_AssistedVerificationMixedSignalTransitionCompletesSignIn(t *testing.T) {
+	isolateParkFixture(t)
+	t.Setenv(assistedLoginEnv, "1")
+
+	chrome := newFakeLoginChrome(t)
+	chrome.verification = true
+	chrome.captchaSel = true
+	chrome.onGetCodeClick = func() {
+		if err := DeliverVerificationCode("123456"); err != nil {
+			t.Errorf("DeliverVerificationCode: %v", err)
+		}
+	}
+	chrome.onAfterCodeProbe = func() {
+		chrome.mu.Lock()
+		defer chrome.mu.Unlock()
+		chrome.verification = false
+		chrome.captchaSel = false
+	}
+
+	session, err := performModelStudioAutoLogin(context.Background(), chrome.port, loginCredentials{Username: "me@example.com", Password: "s3cret"})
+	if err != nil {
+		t.Fatalf("expected mixed-signal verification transition to complete sign-in, got error: %v", err)
+	}
+	if !strings.Contains(session.Cookie, "login_aliyunid_ticket=") {
+		t.Fatalf("expected captured session cookie after redirect, got %+v", session)
+	}
+	chrome.mu.Lock()
+	clicks := chrome.getCodeClicks
+	chrome.mu.Unlock()
+	if clicks != 1 {
+		t.Errorf("getCodeClicks = %d, want 1", clicks)
 	}
 }

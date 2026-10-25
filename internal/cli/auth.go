@@ -21,6 +21,7 @@ import (
 	"github.com/joshuadavidthomas/vibeusage/internal/display"
 	"github.com/joshuadavidthomas/vibeusage/internal/prompt"
 	"github.com/joshuadavidthomas/vibeusage/internal/provider"
+	"github.com/joshuadavidthomas/vibeusage/internal/provider/modelstudio"
 )
 
 const tokenFromStdin = "-"
@@ -31,12 +32,60 @@ var authCmd = &cobra.Command{
 	Args:  validateAuthArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		showStatus, _ := cmd.Flags().GetBool("status")
+		diagnoseFlag, _ := cmd.Flags().GetBool("diagnose")
+		deleteFlag, _ := cmd.Flags().GetBool("delete")
+
+		if cmd.Flags().Changed("code") {
+			if showStatus || diagnoseFlag || deleteFlag || cmd.Flags().Changed("token") {
+				return errors.New("--code cannot be combined with --status, --diagnose, --delete, or --token")
+			}
+			if len(args) == 0 {
+				return errors.New("--code requires the modelstudio provider argument")
+			}
+			providerID := args[0]
+			codeArg := ""
+			if len(args) == 2 {
+				if args[0] == "modelstudio" {
+					providerID = args[0]
+					codeArg = args[1]
+				} else if args[1] == "modelstudio" {
+					providerID = args[1]
+					codeArg = args[0]
+				} else {
+					providerID = ""
+				}
+			}
+			if providerID != "modelstudio" {
+				return errors.New("--code is only supported for modelstudio")
+			}
+			value, _ := cmd.Flags().GetString("code")
+			if value == tokenFromStdin && len(args) == 2 {
+				value = codeArg
+			}
+			if value == tokenFromStdin {
+				reader := cmd.InOrStdin()
+				if file, ok := reader.(*os.File); ok && (isatty.IsTerminal(file.Fd()) || isatty.IsCygwinTerminal(file.Fd())) {
+					return errors.New("--code has no value or piped input; pass the verification digits or pipe them on standard input")
+				}
+				var err error
+				value, err = readCredential(reader)
+				if err != nil {
+					return err
+				}
+			}
+			if err := modelstudio.DeliverVerificationCode(value); err != nil {
+				return err
+			}
+			if !quiet {
+				out("✓ %s verification code delivered\n", provider.DisplayName("modelstudio"))
+			}
+			return nil
+		}
 
 		if showStatus {
 			return authStatusCommand()
 		}
 
-		diagnoseFlag, _ := cmd.Flags().GetBool("diagnose")
 		if diagnoseFlag {
 			if len(args) == 0 {
 				return errors.New("--diagnose requires a provider argument")
@@ -54,12 +103,25 @@ var authCmd = &cobra.Command{
 		}
 
 		providerID := args[0]
+		tokenArg := ""
+		if len(args) == 2 {
+			tokenArg = args[1]
+		}
 		p, ok := provider.Get(providerID)
+		if !ok && len(args) == 2 && cmd.Flags().Changed("token") {
+			if p2, ok2 := provider.Get(args[1]); ok2 {
+				providerID = args[1]
+				tokenArg = args[0]
+				p, ok = p2, true
+			}
+		}
 		if !ok {
+			if cmd.Flags().Changed("token") {
+				return fmt.Errorf("unknown provider. Available: %s", strings.Join(provider.ListIDs(), ", "))
+			}
 			return fmt.Errorf("unknown provider: %s. Available: %s", providerID, strings.Join(provider.ListIDs(), ", "))
 		}
 
-		deleteFlag, _ := cmd.Flags().GetBool("delete")
 		if deleteFlag {
 			return authDeleteProvider(providerID)
 		}
@@ -67,8 +129,9 @@ var authCmd = &cobra.Command{
 		if cmd.Flags().Changed("token") {
 			value, _ := cmd.Flags().GetString("token")
 			if value == tokenFromStdin && len(args) == 2 {
-				value = args[1]
-			} else if value == tokenFromStdin {
+				value = tokenArg
+			}
+			if value == tokenFromStdin {
 				reader := cmd.InOrStdin()
 				if file, ok := reader.(*os.File); ok && (isatty.IsTerminal(file.Fd()) || isatty.IsCygwinTerminal(file.Fd())) {
 					return errors.New("--token has no value or piped input; pass a value or omit the flag for a masked prompt")
@@ -107,8 +170,10 @@ func init() {
 	authCmd.Flags().Bool("status", false, "Show authentication status")
 	authCmd.Flags().Bool("delete", false, "Remove a provider and its vibeusage-stored credentials")
 	authCmd.Flags().String("token", "", "Set a credential; omit the value to read from standard input")
+	authCmd.Flags().String("code", "", "Deliver a one-time verification code for an in-flight Model Studio sign-in (with VIBEUSAGE_MODELSTUDIO_ASSIST=1); omit the value or pass '-' to read from standard input")
 	authCmd.Flags().Bool("diagnose", false, "Show read-only credential and session diagnostics for a provider")
 	authCmd.Flags().Lookup("token").NoOptDefVal = tokenFromStdin
+	authCmd.Flags().Lookup("code").NoOptDefVal = tokenFromStdin
 }
 
 // authDiagnoseProvider prints read-only auth diagnostics for one provider.
@@ -174,6 +239,10 @@ func validateAuthArgs(cmd *cobra.Command, args []string) error {
 	}
 	value, _ := cmd.Flags().GetString("token")
 	if len(args) == 2 && cmd.Flags().Changed("token") && value == tokenFromStdin {
+		return nil
+	}
+	codeVal, _ := cmd.Flags().GetString("code")
+	if len(args) == 2 && cmd.Flags().Changed("code") && codeVal == tokenFromStdin {
 		return nil
 	}
 	return cobra.MaximumNArgs(1)(cmd, args)
