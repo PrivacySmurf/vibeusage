@@ -551,6 +551,7 @@ func (s *WebConsoleStrategy) resolveSECToken(
 		httpclient.WithHeader("Cookie", cookie),
 		httpclient.WithHeader("Referer", strings.TrimRight(consoleBaseURL, "/")+"/"),
 		httpclient.WithHeader("User-Agent", browserUserAgent),
+		httpclient.WithSkipRawDump(),
 	)
 	if err != nil {
 		return "", err

@@ -99,7 +99,8 @@ func Refresh(ctx context.Context, refreshToken string, cfg RefreshConfig) *Crede
 
 	client := httpclient.NewFromConfig(cfg.HTTPTimeout)
 	var tokenResp TokenResponse
-	resp, err := client.PostFormCtx(ctx, cfg.TokenURL, form, &tokenResp, cfg.Headers...)
+	opts := append(append([]httpclient.RequestOption(nil), cfg.Headers...), httpclient.WithSkipRawDump())
+	resp, err := client.PostFormCtx(ctx, cfg.TokenURL, form, &tokenResp, opts...)
 	if err != nil || resp.StatusCode != 200 || resp.JSONErr != nil {
 		return nil
 	}

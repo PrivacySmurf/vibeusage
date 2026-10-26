@@ -19,6 +19,7 @@ import (
 	"github.com/joshuadavidthomas/vibeusage/internal/auth/device"
 	"github.com/joshuadavidthomas/vibeusage/internal/config"
 	"github.com/joshuadavidthomas/vibeusage/internal/display"
+	"github.com/joshuadavidthomas/vibeusage/internal/fetch"
 	"github.com/joshuadavidthomas/vibeusage/internal/prompt"
 	"github.com/joshuadavidthomas/vibeusage/internal/provider"
 	"github.com/joshuadavidthomas/vibeusage/internal/provider/modelstudio"
@@ -554,7 +555,7 @@ func verifyCredentialsDefault(parent context.Context, providerID string) bool {
 	if !ok {
 		return false
 	}
-	ctx, cancel := context.WithTimeout(parent, 10*time.Second)
+	ctx, cancel := context.WithTimeout(fetch.WithProvider(parent, providerID), 10*time.Second)
 	defer cancel()
 	for _, s := range p.FetchStrategies() {
 		if !s.IsAvailable() {

@@ -87,7 +87,7 @@ var rootCmd = &cobra.Command{
 func init() {
 	rootCmd.PersistentFlags().BoolVarP(&jsonOutput, "json", "j", false, "Output as JSON")
 	rootCmd.PersistentFlags().BoolVar(&noColor, "no-color", false, "Disable colored output")
-	rootCmd.PersistentFlags().BoolVarP(&verbose, "verbose", "v", false, "Show detailed output")
+	rootCmd.PersistentFlags().BoolVarP(&verbose, "verbose", "v", false, "Show detailed output (set VIBEUSAGE_DEBUG_RAW=1 to also dump raw HTTP responses to cache)")
 	rootCmd.PersistentFlags().BoolVarP(&quiet, "quiet", "q", false, "Minimal output")
 	rootCmd.PersistentFlags().BoolVar(&noCache, "no-cache", false, "Disable cached snapshot reuse and fallback")
 	rootCmd.Flags().Bool("version", false, "Show version and exit")
@@ -380,7 +380,7 @@ func fetchAndDisplayProvider(ctx context.Context, providerID string) error {
 	// Fetch status concurrently with usage — best-effort, don't block on failure.
 	statusCh := make(chan models.ProviderStatus, 1)
 	go func() {
-		statusCh <- p.FetchStatus(ctx)
+		statusCh <- p.FetchStatus(fetch.WithProvider(ctx, providerID))
 	}()
 
 	strategies := p.FetchStrategies()

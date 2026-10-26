@@ -780,6 +780,7 @@ func TestSubdirectoryPaths(t *testing.T) {
 		{"CredentialsFile", CredentialsFile(), filepath.Join(dataDir, "credentials.json")},
 		{"SnapshotsDir", SnapshotsDir(), filepath.Join(cacheDir, "snapshots")},
 		{"OrgIDsDir", OrgIDsDir(), filepath.Join(cacheDir, "org-ids")},
+		{"RawDumpsDir", RawDumpsDir(), filepath.Join(cacheDir, "raw")},
 		{"ConfigFile", ConfigFile(), filepath.Join(configDir, "config.toml")},
 	}
 	for _, tt := range tests {
@@ -2122,5 +2123,135 @@ func TestFileThrottleStore_ImplementsInterface(t *testing.T) {
 	}
 	if loaded != nil {
 		t.Error("expected nil after Clear")
+	}
+}
+
+func TestWriteRawDump_Permissions(t *testing.T) {
+	setupTempDir(t)
+
+	rawDir := RawDumpsDir()
+	if err := os.MkdirAll(rawDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(%q) error: %v", rawDir, err)
+	}
+	if runtime.GOOS != "windows" {
+		if err := os.Chmod(rawDir, 0o755); err != nil {
+			t.Fatalf("Chmod(%q) error: %v", rawDir, err)
+		}
+	}
+
+	payload := []byte("Status: 200 OK\n\n{\"ok\":true}\n")
+	path, err := WriteRawDump("20261026T140000Z-zai-1.dump", payload)
+	if err != nil {
+		t.Fatalf("WriteRawDump() error: %v", err)
+	}
+	wantPath := filepath.Join(rawDir, "20261026T140000Z-zai-1.dump")
+	if path != wantPath {
+		t.Errorf("WriteRawDump() path = %q, want %q", path, wantPath)
+	}
+
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile(%q) error: %v", path, err)
+	}
+	if string(got) != string(payload) {
+		t.Errorf("dump content = %q, want %q", string(got), string(payload))
+	}
+
+	if runtime.GOOS != "windows" {
+		dirInfo, err := os.Stat(rawDir)
+		if err != nil {
+			t.Fatalf("Stat(%q) error: %v", rawDir, err)
+		}
+		if perm := dirInfo.Mode().Perm(); perm != 0o700 {
+			t.Errorf("raw dump directory permissions = %o, want 0700", perm)
+		}
+
+		fileInfo, err := os.Stat(path)
+		if err != nil {
+			t.Fatalf("Stat(%q) error: %v", path, err)
+		}
+		if perm := fileInfo.Mode().Perm(); perm != 0o600 {
+			t.Errorf("raw dump file permissions = %o, want 0600", perm)
+		}
+	}
+}
+
+func TestR1_2_WriteRawDump_RejectsSymlinkAndNonDirectoryRawLeaf(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink permission semantics are Unix-specific")
+	}
+
+	root := t.TempDir()
+	externalDir := filepath.Join(root, "external")
+	if err := os.MkdirAll(externalDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(externalDir): %v", err)
+	}
+	if err := os.Chmod(externalDir, 0o755); err != nil {
+		t.Fatalf("Chmod(externalDir): %v", err)
+	}
+
+	cacheDir := filepath.Join(root, "cache")
+	if err := os.MkdirAll(cacheDir, 0o700); err != nil {
+		t.Fatalf("MkdirAll(cacheDir): %v", err)
+	}
+	testenv.SetCacheDir(t.Setenv, cacheDir)
+
+	if err := os.Symlink(externalDir, RawDumpsDir()); err != nil {
+		t.Fatalf("Symlink(externalDir, RawDumpsDir): %v", err)
+	}
+
+	if _, err := WriteRawDump("20261026T150000Z-zai-1.dump", []byte("secret-body")); err == nil {
+		t.Fatal("WriteRawDump() succeeded when RawDumpsDir() was a symlink, want error")
+	}
+
+	entries, err := os.ReadDir(externalDir)
+	if err != nil {
+		t.Fatalf("ReadDir(externalDir): %v", err)
+	}
+	if len(entries) != 0 {
+		t.Errorf("externalDir entries = %d, want 0", len(entries))
+	}
+	extInfo, err := os.Stat(externalDir)
+	if err != nil {
+		t.Fatalf("Stat(externalDir): %v", err)
+	}
+	if perm := extInfo.Mode().Perm(); perm != 0o755 {
+		t.Errorf("externalDir permissions = %o, want unchanged 0755", perm)
+	}
+
+	// Non-directory file at RawDumpsDir() must also be rejected.
+	nonDirCache := filepath.Join(root, "cache-nondir")
+	if err := os.MkdirAll(nonDirCache, 0o700); err != nil {
+		t.Fatalf("MkdirAll(nonDirCache): %v", err)
+	}
+	testenv.SetCacheDir(t.Setenv, nonDirCache)
+	if err := os.WriteFile(RawDumpsDir(), []byte("not-a-dir"), 0o600); err != nil {
+		t.Fatalf("WriteFile(RawDumpsDir): %v", err)
+	}
+	if _, err := WriteRawDump("20261026T150000Z-zai-2.dump", []byte("secret-body")); err == nil {
+		t.Fatal("WriteRawDump() succeeded when RawDumpsDir() was a regular file, want error")
+	}
+
+	// Operator-selected symlinked CacheDir() root with a real raw directory inside must still succeed.
+	realCacheRoot := filepath.Join(root, "real-cache-root")
+	if err := os.MkdirAll(realCacheRoot, 0o700); err != nil {
+		t.Fatalf("MkdirAll(realCacheRoot): %v", err)
+	}
+	symlinkCacheRoot := filepath.Join(root, "symlink-cache-root")
+	if err := os.Symlink(realCacheRoot, symlinkCacheRoot); err != nil {
+		t.Fatalf("Symlink(realCacheRoot, symlinkCacheRoot): %v", err)
+	}
+	testenv.SetCacheDir(t.Setenv, symlinkCacheRoot)
+
+	dumpPath, err := WriteRawDump("20261026T150000Z-zai-3.dump", []byte("ok-body"))
+	if err != nil {
+		t.Fatalf("WriteRawDump() under symlinked cache root failed: %v", err)
+	}
+	got, err := os.ReadFile(dumpPath)
+	if err != nil {
+		t.Fatalf("ReadFile(%q): %v", dumpPath, err)
+	}
+	if string(got) != "ok-body" {
+		t.Errorf("dump content = %q, want %q", string(got), "ok-body")
 	}
 }

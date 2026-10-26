@@ -81,10 +81,11 @@ type oauthCredentials struct {
 // Parent cancellation is returned as a wrapped context error.
 func Run(ctx context.Context, w io.Writer, quiet bool, cfg Config) (bool, error) {
 	client := httpclient.NewFromConfig(cfg.HTTPTimeout)
+	opts := append(append([]httpclient.RequestOption(nil), cfg.HTTPOptions...), httpclient.WithSkipRawDump())
 
 	// Request device code.
 	var dcResp deviceCodeResponse
-	resp, err := client.PostFormCtx(ctx, cfg.DeviceCodeURL, cfg.DeviceCodeParams, &dcResp, cfg.HTTPOptions...)
+	resp, err := client.PostFormCtx(ctx, cfg.DeviceCodeURL, cfg.DeviceCodeParams, &dcResp, opts...)
 	if err != nil {
 		if ctx.Err() != nil {
 			return false, fmt.Errorf("failed to request device code: %w", ctx.Err())
@@ -165,7 +166,7 @@ func Run(ctx context.Context, w io.Writer, quiet bool, cfg Config) (bool, error)
 		first = false
 
 		var tokenResp tokenResponse
-		pollResp, err := client.PostFormCtx(pollCtx, cfg.TokenURL, tokenParams, &tokenResp, cfg.HTTPOptions...)
+		pollResp, err := client.PostFormCtx(pollCtx, cfg.TokenURL, tokenParams, &tokenResp, opts...)
 		if err != nil {
 			if ctx.Err() != nil {
 				return false, fmt.Errorf("polling for access token: %w", ctx.Err())

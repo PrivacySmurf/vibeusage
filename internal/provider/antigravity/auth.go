@@ -148,7 +148,7 @@ func exchangeCode(ctx context.Context, w io.Writer, code, redirectURI, verifier 
 	client := httpclient.NewFromConfig(config.Get().Fetch.Timeout)
 
 	var tokenResp google.TokenResponse
-	resp, err := client.PostFormCtx(ctx, google.TokenURL, tokenExchangeForm(code, redirectURI, verifier), &tokenResp)
+	resp, err := client.PostFormCtx(ctx, google.TokenURL, tokenExchangeForm(code, redirectURI, verifier), &tokenResp, httpclient.WithSkipRawDump())
 	if err != nil {
 		if ctx.Err() != nil {
 			return false, fmt.Errorf("token exchange failed: %w", ctx.Err())

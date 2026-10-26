@@ -71,6 +71,9 @@ func (c *Client) DoCtx(ctx context.Context, method, rawURL string, body io.Reade
 	defer func() { _ = resp.Body.Close() }()
 
 	respBody, err := io.ReadAll(resp.Body)
+	if debugRawEnabled() {
+		maybeWriteRawDump(ctx, req, resp, respBody)
+	}
 	if err != nil {
 		return nil, err
 	}

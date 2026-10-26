@@ -5,8 +5,12 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"testing"
 	"time"
+
+	"github.com/joshuadavidthomas/vibeusage/internal/config"
+	"github.com/joshuadavidthomas/vibeusage/internal/testenv"
 )
 
 func TestCredentials_NeedsRefresh(t *testing.T) {
@@ -372,5 +376,33 @@ func TestRefresh_EmptyAccessTokenDoesNotInvokeSave(t *testing.T) {
 	}
 	if saveCalled {
 		t.Error("Save must not be called when access_token is empty")
+	}
+}
+
+func TestRefresh_DoesNotWriteRawDebugDump(t *testing.T) {
+	testenv.ApplyVibeusage(t, t.TempDir())
+	t.Setenv("VIBEUSAGE_DEBUG_RAW", "1")
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(TokenResponse{
+			AccessToken:  "refresh-secret-access-token",
+			RefreshToken: "refresh-secret-refresh-token",
+			ExpiresIn:    3600,
+		})
+	}))
+	defer srv.Close()
+
+	got := Refresh(context.Background(), "initial-refresh-token", RefreshConfig{
+		TokenURL: srv.URL + "/oauth/token",
+	})
+	if got == nil || got.AccessToken != "refresh-secret-access-token" {
+		t.Fatalf("Refresh() = %+v, want refreshed credentials", got)
+	}
+
+	if entries, err := os.ReadDir(config.RawDumpsDir()); err == nil && len(entries) > 0 {
+		t.Fatalf("expected no raw dumps for oauth.Refresh, got %d files", len(entries))
+	} else if err != nil && !os.IsNotExist(err) {
+		t.Fatalf("ReadDir(RawDumpsDir): %v", err)
 	}
 }

@@ -3,7 +3,11 @@ package cli
 import (
 	"bytes"
 	"context"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -11,10 +15,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/joshuadavidthomas/vibeusage/internal/config"
 	"github.com/joshuadavidthomas/vibeusage/internal/fetch"
 	"github.com/joshuadavidthomas/vibeusage/internal/logging"
 	"github.com/joshuadavidthomas/vibeusage/internal/models"
 	"github.com/joshuadavidthomas/vibeusage/internal/provider"
+	"github.com/joshuadavidthomas/vibeusage/internal/provider/claude"
+	"github.com/joshuadavidthomas/vibeusage/internal/testenv"
 )
 
 func TestDisplayStatusTable_ContainsProviderData(t *testing.T) {
@@ -340,4 +347,84 @@ func (s *statusStubProvider) FetchStatus(ctx context.Context) models.ProviderSta
 		return s.fetchStatus(ctx)
 	}
 	return models.ProviderStatus{}
+}
+
+type statusRedirectRoundTripper struct {
+	target *url.URL
+	base   http.RoundTripper
+}
+
+func (rt statusRedirectRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	cloned := req.Clone(req.Context())
+	u := *cloned.URL
+	u.Scheme = rt.target.Scheme
+	u.Host = rt.target.Host
+	cloned.URL = &u
+	cloned.Host = rt.target.Host
+	return rt.base.RoundTrip(cloned)
+}
+
+func TestR1_3_FetchStatus_PropagatesProviderToRawDump(t *testing.T) {
+	testenv.ApplyVibeusage(t, t.TempDir())
+	t.Setenv("VIBEUSAGE_DEBUG_RAW", "1")
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"status":{"indicator":"none","description":"All Systems Operational"}}`))
+	}))
+	defer srv.Close()
+
+	// 1. CLI status dispatch propagates provider ID on context.
+	statuses := fetchAllStatuses(context.Background(), map[string]provider.Provider{
+		"claude": &statusStubProvider{
+			id: "claude",
+			fetchStatus: func(ctx context.Context) models.ProviderStatus {
+				if got := fetch.ProviderFromContext(ctx); got != "claude" {
+					t.Errorf("ProviderFromContext(ctx) = %q, want %q", got, "claude")
+				}
+				return provider.FetchStatuspageStatus(ctx, srv.URL)
+			},
+		},
+	}, 1, nil)
+	if statuses["claude"].Level != models.StatusOperational {
+		t.Fatalf("statuses[claude].Level = %v, want %v", statuses["claude"].Level, models.StatusOperational)
+	}
+
+	// 2. Direct provider FetchStatus without explicit context still resolves "claude"
+	// via call-stack fallback instead of shared "status" from internal/provider/status.go.
+	targetURL, err := url.Parse(srv.URL)
+	if err != nil {
+		t.Fatalf("url.Parse: %v", err)
+	}
+	origTransport := http.DefaultTransport
+	http.DefaultTransport = statusRedirectRoundTripper{target: targetURL, base: origTransport}
+	defer func() { http.DefaultTransport = origTransport }()
+
+	directStatus := (claude.Claude{}).FetchStatus(context.Background())
+	if directStatus.Level != models.StatusOperational {
+		t.Fatalf("direct Claude.FetchStatus() = %v, want %v", directStatus.Level, models.StatusOperational)
+	}
+
+	entries, err := os.ReadDir(config.RawDumpsDir())
+	if err != nil {
+		t.Fatalf("ReadDir(RawDumpsDir): %v", err)
+	}
+	if len(entries) != 2 {
+		t.Fatalf("raw dump file count = %d, want 2", len(entries))
+	}
+	for _, entry := range entries {
+		if strings.Contains(entry.Name(), "-status-") {
+			t.Errorf("dump filename %q erroneously used shared helper name 'status' as provider", entry.Name())
+		}
+		if !strings.Contains(entry.Name(), "-claude-") {
+			t.Errorf("dump filename %q missing '-claude-' provider token", entry.Name())
+		}
+		dumpBytes, readErr := os.ReadFile(filepath.Join(config.RawDumpsDir(), entry.Name()))
+		if readErr != nil {
+			t.Fatalf("ReadFile(%s): %v", entry.Name(), readErr)
+		}
+		if !strings.Contains(string(dumpBytes), "Provider: claude\n") {
+			t.Errorf("dump %s missing 'Provider: claude':\n%s", entry.Name(), string(dumpBytes))
+		}
+	}
 }

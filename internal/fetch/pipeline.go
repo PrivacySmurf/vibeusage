@@ -23,6 +23,7 @@ func ExecutePipeline(ctx context.Context, providerID string, strategies []Strate
 	if ctx.Err() != nil {
 		return contextCancelledOutcome(providerID)
 	}
+	ctx = WithProvider(ctx, providerID)
 
 	// Honor a persisted rate-limit cooldown before any network attempt.
 	// Within the window, serve cache if present; otherwise surface the

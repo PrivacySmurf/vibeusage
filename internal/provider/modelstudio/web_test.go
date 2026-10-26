@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/joshuadavidthomas/vibeusage/internal/auth/oauth"
 	"github.com/joshuadavidthomas/vibeusage/internal/config"
 	"github.com/joshuadavidthomas/vibeusage/internal/httpclient"
 	"github.com/joshuadavidthomas/vibeusage/internal/testenv"
@@ -974,5 +975,78 @@ func TestSessionLifetime_IgnoresMalformedEntriesInMinimumAndDedupe(t *testing.T)
 	}
 	if entries[0].LifetimeSeconds != 144000 || entries[1].LifetimeSeconds != 129600 {
 		t.Errorf("entries lifetimes = [%d, %d], want [144000, 129600]", entries[0].LifetimeSeconds, entries[1].LifetimeSeconds)
+	}
+}
+
+func TestR1_1_CredentialExchangeAndSECTokenNeverDumped(t *testing.T) {
+	testenv.ApplyVibeusage(t, t.TempDir())
+	t.Setenv("VIBEUSAGE_DEBUG_RAW", "1")
+	disableBrowserFallbackForTest(t)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/oauth/token":
+			_, _ = fmt.Fprint(w, `{"access_token":"r1-1-access-secret-token","refresh_token":"r1-1-refresh-secret-token","expires_in":3600}`)
+		case r.Method == http.MethodGet && r.URL.Path == "/tool/user/info.json":
+			_, _ = fmt.Fprint(w, `{"code":"200","data":{"secToken":"r1-1-sec-token-secret"},"httpStatusCode":"200","successResponse":true}`)
+		case r.Method == http.MethodPost && r.URL.Path == "/data/api.json":
+			_, _ = fmt.Fprint(w, successfulSummaryPayload())
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	refreshed := oauth.Refresh(context.Background(), "r1-1-initial-refresh-secret", oauth.RefreshConfig{
+		TokenURL: srv.URL + "/oauth/token",
+	})
+	if refreshed == nil || refreshed.AccessToken != "r1-1-access-secret-token" {
+		t.Fatalf("oauth.Refresh() = %+v, want refreshed credentials", refreshed)
+	}
+
+	storeModelStudioTestSession(t, sessionCredentials{
+		Cookie: "login_aliyunid_ticket=r1-1-cookie-secret; login_current_pk=account",
+		Source: sessionSourceManual,
+	})
+
+	strategy := &WebConsoleStrategy{
+		ConsoleBaseURL: srv.URL,
+		DashboardURL:   srv.URL + "/ap-southeast-1/?tab=plan",
+		Region:         modelStudioRegion,
+		ProductCode:    modelStudioTeamProduct,
+	}
+	result, err := strategy.Fetch(context.Background())
+	if err != nil {
+		t.Fatalf("Fetch() error: %v", err)
+	}
+	if !result.Success {
+		t.Fatalf("Fetch() result = %+v, want Success=true", result)
+	}
+
+	entries, err := os.ReadDir(config.RawDumpsDir())
+	if err != nil {
+		t.Fatalf("ReadDir(RawDumpsDir): %v", err)
+	}
+	for _, entry := range entries {
+		dumpBytes, readErr := os.ReadFile(filepath.Join(config.RawDumpsDir(), entry.Name()))
+		if readErr != nil {
+			t.Fatalf("ReadFile(%s): %v", entry.Name(), readErr)
+		}
+		text := string(dumpBytes)
+		for _, secret := range []string{
+			"r1-1-access-secret-token",
+			"r1-1-refresh-secret-token",
+			"r1-1-initial-refresh-secret",
+			"r1-1-sec-token-secret",
+			"r1-1-cookie-secret",
+		} {
+			if strings.Contains(text, secret) {
+				t.Errorf("raw dump %s leaked secret %q", entry.Name(), secret)
+			}
+		}
+	}
+	if len(entries) != 1 {
+		t.Fatalf("raw dump file count = %d, want 1 (only /data/api.json usage response)", len(entries))
 	}
 }

@@ -156,3 +156,24 @@ func StrategyName(s Strategy) string {
 	}
 	return strings.ToLower(name)
 }
+
+type providerContextKey struct{}
+
+// WithProvider returns a new context carrying the provider ID for the active fetch attempt.
+func WithProvider(ctx context.Context, providerID string) context.Context {
+	if providerID == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, providerContextKey{}, providerID)
+}
+
+// ProviderFromContext retrieves the provider ID attached to ctx, or "" if none is set.
+func ProviderFromContext(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	if v, ok := ctx.Value(providerContextKey{}).(string); ok {
+		return v
+	}
+	return ""
+}

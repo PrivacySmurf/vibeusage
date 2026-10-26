@@ -1871,3 +1871,26 @@ func TestPipelineHonorsTimeoutExtender(t *testing.T) {
 		t.Errorf("a smaller extension must not shrink the timeout: %v", shrinking.observed)
 	}
 }
+
+func TestExecutePipeline_PropagatesProviderToContext(t *testing.T) {
+	var observedProvider string
+	strategy := &mockStrategy{
+		available: true,
+		fetchFn: func(ctx context.Context) (FetchResult, error) {
+			observedProvider = ProviderFromContext(ctx)
+			return ResultOK(models.UsageSnapshot{
+				Provider:  "zai",
+				FetchedAt: time.Now().UTC(),
+				Periods:   []models.UsagePeriod{{Name: "monthly", Utilization: 10}},
+			}), nil
+		},
+	}
+
+	outcome := ExecutePipeline(context.Background(), "zai", []Strategy{strategy}, false, defaultTestPipelineCfg())
+	if !outcome.Success {
+		t.Fatalf("expected success, got error: %s", outcome.Error)
+	}
+	if observedProvider != "zai" {
+		t.Errorf("ProviderFromContext(ctx) = %q, want %q", observedProvider, "zai")
+	}
+}

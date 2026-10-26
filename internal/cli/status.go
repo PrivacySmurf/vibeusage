@@ -9,6 +9,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/joshuadavidthomas/vibeusage/internal/display"
+	"github.com/joshuadavidthomas/vibeusage/internal/fetch"
 	"github.com/joshuadavidthomas/vibeusage/internal/logging"
 	"github.com/joshuadavidthomas/vibeusage/internal/models"
 	"github.com/joshuadavidthomas/vibeusage/internal/provider"
@@ -76,7 +77,7 @@ func fetchAllStatuses(ctx context.Context, providers map[string]provider.Provide
 			sem <- struct{}{}
 			defer func() { <-sem }()
 
-			status := prov.FetchStatus(ctx)
+			status := prov.FetchStatus(fetch.WithProvider(ctx, pid))
 			mu.Lock()
 			statuses[pid] = status
 			mu.Unlock()

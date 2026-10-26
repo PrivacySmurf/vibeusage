@@ -90,6 +90,81 @@ func AtomicWriteFile(path string, data []byte) (err error) {
 	return nil
 }
 
+// WriteRawDump writes raw debug response bytes under RawDumpsDir() with
+// directory mode 0700 and file mode 0600.
+func WriteRawDump(filename string, data []byte) (path string, err error) {
+	base := filepath.Base(filename)
+	if base == "" || base == "." || base == ".." {
+		return "", fmt.Errorf("invalid raw dump filename %q", filename)
+	}
+
+	dir := RawDumpsDir()
+	if info, lstatErr := os.Lstat(dir); lstatErr == nil {
+		if info.Mode()&os.ModeSymlink != 0 {
+			return "", fmt.Errorf("raw dump directory %s must not be a symlink", dir)
+		}
+		if !info.IsDir() {
+			return "", fmt.Errorf("raw dump path %s is not a directory", dir)
+		}
+	} else if !os.IsNotExist(lstatErr) {
+		return "", fmt.Errorf("checking raw dump directory: %w", lstatErr)
+	}
+	if err = os.MkdirAll(dir, 0o700); err != nil {
+		return "", fmt.Errorf("creating raw dump directory: %w", err)
+	}
+	dirInfo, err := os.Lstat(dir)
+	if err != nil {
+		return "", fmt.Errorf("checking raw dump directory: %w", err)
+	}
+	if dirInfo.Mode()&os.ModeSymlink != 0 {
+		return "", fmt.Errorf("raw dump directory %s must not be a symlink", dir)
+	}
+	if !dirInfo.IsDir() {
+		return "", fmt.Errorf("raw dump path %s is not a directory", dir)
+	}
+	if err = secureCredentialDirectory(dir); err != nil {
+		return "", fmt.Errorf("securing raw dump directory: %w", err)
+	}
+
+	path = filepath.Join(dir, base)
+	tmp, err := os.CreateTemp(dir, "."+base+".tmp-*")
+	if err != nil {
+		return "", fmt.Errorf("creating raw dump temp file: %w", err)
+	}
+	tmpPath := tmp.Name()
+	defer func() {
+		if err != nil {
+			_ = os.Remove(tmpPath)
+		}
+	}()
+
+	if err = secureCredentialFile(tmpPath); err != nil {
+		_ = tmp.Close()
+		return "", fmt.Errorf("securing raw dump temp file: %w", err)
+	}
+	if _, err = tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return "", fmt.Errorf("writing raw dump: %w", err)
+	}
+	if err = tmp.Close(); err != nil {
+		return "", fmt.Errorf("closing raw dump temp file: %w", err)
+	}
+	if err = replaceFile(tmpPath, path); err != nil {
+		return "", fmt.Errorf("replacing raw dump file: %w", err)
+	}
+	dstInfo, err := os.Lstat(path)
+	if err != nil {
+		return "", fmt.Errorf("checking raw dump file: %w", err)
+	}
+	if dstInfo.Mode()&os.ModeSymlink != 0 || !dstInfo.Mode().IsRegular() {
+		return "", fmt.Errorf("raw dump file %s must be a regular file", path)
+	}
+	if err = secureCredentialFile(path); err != nil {
+		return "", fmt.Errorf("securing raw dump file: %w", err)
+	}
+	return path, nil
+}
+
 // Org ID caching
 func OrgIDPath(providerID string) string {
 	return filepath.Join(OrgIDsDir(), providerID+".txt")

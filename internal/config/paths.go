@@ -44,6 +44,7 @@ func HistoryDir() string      { return filepath.Join(DataDir(), "history") }
 func SnapshotsDir() string    { return filepath.Join(CacheDir(), "snapshots") }
 func OrgIDsDir() string       { return filepath.Join(CacheDir(), "org-ids") }
 func ThrottlesDir() string    { return filepath.Join(CacheDir(), "throttles") }
+func RawDumpsDir() string     { return filepath.Join(CacheDir(), "raw") }
 func ModelsFile() string      { return filepath.Join(CacheDir(), "models.json") }
 func MultipliersFile() string { return filepath.Join(CacheDir(), "multipliers.json") }
 func ConfigFile() string      { return filepath.Join(ConfigDir(), "config.toml") }

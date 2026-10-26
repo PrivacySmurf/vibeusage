@@ -617,6 +617,7 @@ vibeusage route --role coding
 | `VIBEUSAGE_CACHE_DIR` | Override cache directory |
 | `VIBEUSAGE_CONFIG_DIR` | Override config directory |
 | `VIBEUSAGE_DATA_DIR` | Override data directory (credentials storage) |
+| `VIBEUSAGE_DEBUG_RAW` | When `1` or `true`, write redacted raw provider HTTP responses to `$VIBEUSAGE_CACHE_DIR/raw/` (`0600` files in a `0700` directory) |
 | `VIBEUSAGE_NO_COLOR` | Disable colored output |
 | `VIBEUSAGE_UPDATE_GITHUB_TOKEN` | Optional GitHub token used by `vibeusage update` (helps avoid rate limits) |
 | `WARP_API_KEY` | Warp API key |
