@@ -5,9 +5,12 @@ import (
 	"testing"
 
 	"github.com/joshuadavidthomas/vibeusage/internal/models"
+	"github.com/joshuadavidthomas/vibeusage/internal/testenv"
 )
 
 func TestAPIKeyStrategy_IsAvailable_EnvVar(t *testing.T) {
+	dirs := testenv.ApplyVibeusage(t, t.TempDir())
+	t.Cleanup(func() { _ = dirs.Close() })
 	t.Setenv("ZAI_API_KEY", "test-key")
 	s := &APIKeyStrategy{}
 	if !s.IsAvailable() {
@@ -16,19 +19,25 @@ func TestAPIKeyStrategy_IsAvailable_EnvVar(t *testing.T) {
 }
 
 func TestAPIKeyStrategy_IsAvailable_NoEnvVar(t *testing.T) {
+	dirs := testenv.ApplyVibeusage(t, t.TempDir())
+	t.Cleanup(func() { _ = dirs.Close() })
 	t.Setenv("ZAI_API_KEY", "")
 	s := &APIKeyStrategy{}
-	// Only assert false when no credential file exists either.
-	if zaiAPIKey.Load() == "" && s.IsAvailable() {
+	if got := zaiAPIKey.Load(); got != "" {
+		t.Fatalf("zaiAPIKey.Load() = %q, want empty in isolated fixture", got)
+	}
+	if s.IsAvailable() {
 		t.Error("IsAvailable() = true, want false when no token available")
 	}
 }
 
 func TestAPIKeyStrategy_Fetch_NoToken(t *testing.T) {
+	dirs := testenv.ApplyVibeusage(t, t.TempDir())
+	t.Cleanup(func() { _ = dirs.Close() })
 	t.Setenv("ZAI_API_KEY", "")
 	s := &APIKeyStrategy{}
-	if zaiAPIKey.Load() != "" {
-		t.Skip("credential file present — skipping no-token test")
+	if got := zaiAPIKey.Load(); got != "" {
+		t.Fatalf("zaiAPIKey.Load() = %q, want empty in isolated fixture", got)
 	}
 
 	result, err := s.Fetch(context.Background())

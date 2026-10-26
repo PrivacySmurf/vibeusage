@@ -121,7 +121,7 @@ func TestRootCmd_VersionFlag(t *testing.T) {
 
 	// Set up temp dir to avoid first-run check
 	tmpDir := t.TempDir()
-	testenv.ApplySameDir(t.Setenv, tmpDir)
+	testenv.ApplySameDir(t, tmpDir)
 	config.Override(t, config.DefaultConfig())
 
 	rootCmd.SetArgs([]string{"--version"})
@@ -148,7 +148,7 @@ func TestConfigShow_DefaultOutput(t *testing.T) {
 	defer func() { outWriter = os.Stdout }()
 
 	tmpDir := t.TempDir()
-	testenv.ApplySameDir(t.Setenv, tmpDir)
+	testenv.ApplySameDir(t, tmpDir)
 	config.Override(t, config.DefaultConfig())
 
 	oldQuiet := quiet
@@ -179,7 +179,7 @@ func TestConfigShow_QuietMode(t *testing.T) {
 	defer func() { outWriter = os.Stdout }()
 
 	tmpDir := t.TempDir()
-	testenv.ApplySameDir(t.Setenv, tmpDir)
+	testenv.ApplySameDir(t, tmpDir)
 	config.Override(t, config.DefaultConfig())
 
 	oldQuiet := quiet
@@ -207,7 +207,7 @@ func TestConfigShow_JSONOutput(t *testing.T) {
 	defer func() { outWriter = os.Stdout }()
 
 	tmpDir := t.TempDir()
-	testenv.ApplySameDir(t.Setenv, tmpDir)
+	testenv.ApplySameDir(t, tmpDir)
 	config.Override(t, config.DefaultConfig())
 
 	oldJSON := jsonOutput
@@ -251,7 +251,7 @@ func TestConfigPath_DefaultOutput(t *testing.T) {
 	defer func() { outWriter = os.Stdout }()
 
 	tmpDir := t.TempDir()
-	testenv.ApplySameDir(t.Setenv, tmpDir)
+	testenv.ApplySameDir(t, tmpDir)
 	config.Override(t, config.DefaultConfig())
 
 	oldQuiet := quiet
@@ -282,7 +282,7 @@ func TestConfigPath_QuietMode(t *testing.T) {
 	defer func() { outWriter = os.Stdout }()
 
 	tmpDir := t.TempDir()
-	testenv.ApplySameDir(t.Setenv, tmpDir)
+	testenv.ApplySameDir(t, tmpDir)
 	config.Override(t, config.DefaultConfig())
 
 	oldQuiet := quiet
@@ -311,7 +311,7 @@ func TestConfigPath_JSONOutput(t *testing.T) {
 	defer func() { outWriter = os.Stdout }()
 
 	tmpDir := t.TempDir()
-	testenv.ApplySameDir(t.Setenv, tmpDir)
+	testenv.ApplySameDir(t, tmpDir)
 	config.Override(t, config.DefaultConfig())
 
 	oldJSON := jsonOutput
@@ -342,7 +342,7 @@ func TestConfigPath_CacheFlag(t *testing.T) {
 	defer func() { outWriter = os.Stdout }()
 
 	tmpDir := t.TempDir()
-	testenv.ApplySameDir(t.Setenv, tmpDir)
+	testenv.ApplySameDir(t, tmpDir)
 	config.Override(t, config.DefaultConfig())
 
 	oldQuiet := quiet
@@ -644,7 +644,7 @@ func TestDisplayMultipleSnapshots_NoDataWithErrors_ShowsProviderErrors(t *testin
 
 func TestFetchAndDisplayProvider_RejectsDisabledProvider(t *testing.T) {
 	tmpDir := t.TempDir()
-	testenv.ApplySameDir(t.Setenv, tmpDir)
+	testenv.ApplySameDir(t, tmpDir)
 
 	cfg := config.DefaultConfig()
 	disabled := false
@@ -662,7 +662,7 @@ func TestFetchAndDisplayProvider_RejectsDisabledProvider(t *testing.T) {
 
 func TestRunStatusline_RejectsDisabledExplicitProvider(t *testing.T) {
 	tmpDir := t.TempDir()
-	testenv.ApplySameDir(t.Setenv, tmpDir)
+	testenv.ApplySameDir(t, tmpDir)
 
 	cfg := config.DefaultConfig()
 	disabled := false

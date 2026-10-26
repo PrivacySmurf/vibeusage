@@ -23,7 +23,7 @@ func withIsolatedRegistry(t *testing.T) {
 func withTempCredentialDir(t *testing.T) {
 	t.Helper()
 	dir := t.TempDir()
-	testenv.ApplyVibeusage(t.Setenv, dir)
+	testenv.ApplyVibeusage(t, dir)
 	config.Override(t, config.DefaultConfig())
 }
 

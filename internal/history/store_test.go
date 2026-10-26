@@ -15,6 +15,7 @@ import (
 
 	"github.com/joshuadavidthomas/vibeusage/internal/config"
 	"github.com/joshuadavidthomas/vibeusage/internal/models"
+	"github.com/joshuadavidthomas/vibeusage/internal/testenv"
 )
 
 func testSnapshot(providerID, name string, fetchedAt time.Time) models.UsageSnapshot {
@@ -50,7 +51,7 @@ func writeRecords(t *testing.T, providerID string, records ...Record) {
 }
 
 func TestAppendCreatesPrivateHistoryFile(t *testing.T) {
-	t.Setenv("VIBEUSAGE_DATA_DIR", t.TempDir())
+	testenv.SetDataDir(t.Setenv, t.TempDir())
 
 	if err := Append("claude", testSnapshot("claude", "daily", time.Now())); err != nil {
 		t.Fatalf("appending history: %v", err)
@@ -71,7 +72,7 @@ func TestAppendCreatesPrivateHistoryFile(t *testing.T) {
 }
 
 func TestAppendAndReadPreservesOrder(t *testing.T) {
-	t.Setenv("VIBEUSAGE_DATA_DIR", t.TempDir())
+	testenv.SetDataDir(t.Setenv, t.TempDir())
 
 	first := testSnapshot("claude", "first", time.Now().Add(-2*DedupFloor))
 	second := testSnapshot("claude", "second", time.Now())
@@ -97,7 +98,7 @@ func TestAppendAndReadPreservesOrder(t *testing.T) {
 }
 
 func TestReadSkipsMalformedLines(t *testing.T) {
-	t.Setenv("VIBEUSAGE_DATA_DIR", t.TempDir())
+	testenv.SetDataDir(t.Setenv, t.TempDir())
 
 	first := Record{V: CurrentRecordVersion, Snapshot: testSnapshot("claude", "first", time.Now().Add(-2*time.Minute))}
 	second := Record{V: CurrentRecordVersion, Snapshot: testSnapshot("claude", "second", time.Now())}
@@ -130,7 +131,7 @@ func TestReadSkipsMalformedLines(t *testing.T) {
 }
 
 func TestAppendDeduplicatesRecentHistory(t *testing.T) {
-	t.Setenv("VIBEUSAGE_DATA_DIR", t.TempDir())
+	testenv.SetDataDir(t.Setenv, t.TempDir())
 
 	if err := Append("claude", testSnapshot("claude", "first", time.Now())); err != nil {
 		t.Fatalf("appending first history record: %v", err)
@@ -163,7 +164,7 @@ func TestAppendDeduplicatesRecentHistory(t *testing.T) {
 }
 
 func TestAppendDeduplicatesConcurrentHistory(t *testing.T) {
-	t.Setenv("VIBEUSAGE_DATA_DIR", t.TempDir())
+	testenv.SetDataDir(t.Setenv, t.TempDir())
 
 	const writers = 64
 	start := make(chan struct{})
@@ -196,7 +197,7 @@ func TestAppendDeduplicatesConcurrentHistory(t *testing.T) {
 }
 
 func TestAppendCompactsExpiredRecords(t *testing.T) {
-	t.Setenv("VIBEUSAGE_DATA_DIR", t.TempDir())
+	testenv.SetDataDir(t.Setenv, t.TempDir())
 
 	writeRecords(t, "claude",
 		Record{V: CurrentRecordVersion, Snapshot: testSnapshot("claude", "expired", time.Now().AddDate(0, 0, -MaxAgeDays-1))},
@@ -220,7 +221,7 @@ func TestAppendCompactsExpiredRecords(t *testing.T) {
 }
 
 func TestAppendCompactsOversizedHistory(t *testing.T) {
-	t.Setenv("VIBEUSAGE_DATA_DIR", t.TempDir())
+	testenv.SetDataDir(t.Setenv, t.TempDir())
 
 	writeRecords(t, "claude",
 		Record{V: CurrentRecordVersion, Snapshot: testSnapshot("claude", strings.Repeat("x", MaxFileBytes), time.Now().Add(-2*time.Hour))},
@@ -252,7 +253,7 @@ func TestAppendCompactsOversizedHistory(t *testing.T) {
 }
 
 func TestAppendCompactionPreservesPrivateMode(t *testing.T) {
-	t.Setenv("VIBEUSAGE_DATA_DIR", t.TempDir())
+	testenv.SetDataDir(t.Setenv, t.TempDir())
 
 	writeRecords(t, "claude", Record{
 		V:        CurrentRecordVersion,
@@ -296,7 +297,7 @@ func TestAppendCompactionPreservesPrivateMode(t *testing.T) {
 }
 
 func TestPipelineRecorderSkipsSnapshotsWithoutUsagePeriods(t *testing.T) {
-	t.Setenv("VIBEUSAGE_DATA_DIR", t.TempDir())
+	testenv.SetDataDir(t.Setenv, t.TempDir())
 	recorder := PipelineRecorder{}
 	periodless := models.UsageSnapshot{Provider: "opencode", FetchedAt: time.Now()}
 
@@ -321,7 +322,7 @@ func TestPipelineRecorderSkipsSnapshotsWithoutUsagePeriods(t *testing.T) {
 }
 
 func TestReadPurgesExistingPeriodlessRecords(t *testing.T) {
-	t.Setenv("VIBEUSAGE_DATA_DIR", t.TempDir())
+	testenv.SetDataDir(t.Setenv, t.TempDir())
 	writeRecords(t, "opencode", Record{V: CurrentRecordVersion, Snapshot: models.UsageSnapshot{
 		Provider: "opencode", FetchedAt: time.Now(),
 	}})
@@ -343,7 +344,7 @@ func TestReadPurgesExistingPeriodlessRecords(t *testing.T) {
 }
 
 func TestAppendStoresOnlyHistoryFields(t *testing.T) {
-	t.Setenv("VIBEUSAGE_DATA_DIR", t.TempDir())
+	testenv.SetDataDir(t.Setenv, t.TempDir())
 	balance := 12.5
 	autoReload := true
 	snap := testSnapshot("claude", "daily", time.Now())
@@ -369,7 +370,7 @@ func TestAppendStoresOnlyHistoryFields(t *testing.T) {
 }
 
 func TestHistoryRejectsInvalidProviderAndSnapshotIdentity(t *testing.T) {
-	t.Setenv("VIBEUSAGE_DATA_DIR", t.TempDir())
+	testenv.SetDataDir(t.Setenv, t.TempDir())
 	at := time.Now()
 	for _, providerID := range []string{"", "../escape", `..\\escape`, "Claude", "z.ai", "/absolute"} {
 		snap := testSnapshot(providerID, "daily", at)
@@ -389,7 +390,7 @@ func TestHistoryRejectsInvalidProviderAndSnapshotIdentity(t *testing.T) {
 }
 
 func TestAppendRejectsInvalidTimestamps(t *testing.T) {
-	t.Setenv("VIBEUSAGE_DATA_DIR", t.TempDir())
+	testenv.SetDataDir(t.Setenv, t.TempDir())
 	tests := []struct {
 		name string
 		at   time.Time
@@ -408,7 +409,7 @@ func TestAppendRejectsInvalidTimestamps(t *testing.T) {
 }
 
 func TestReadSortsRecordsByFetchedAt(t *testing.T) {
-	t.Setenv("VIBEUSAGE_DATA_DIR", t.TempDir())
+	testenv.SetDataDir(t.Setenv, t.TempDir())
 	first := time.Now().Add(-3 * time.Hour)
 	second := first.Add(time.Hour)
 	third := second.Add(time.Hour)
@@ -430,7 +431,7 @@ func TestReadSortsRecordsByFetchedAt(t *testing.T) {
 }
 
 func TestReadRefusesUnsupportedRecordVersion(t *testing.T) {
-	t.Setenv("VIBEUSAGE_DATA_DIR", t.TempDir())
+	testenv.SetDataDir(t.Setenv, t.TempDir())
 	writeRecords(t, "claude", Record{V: CurrentRecordVersion + 1, Snapshot: testSnapshot("claude", "future", time.Now())})
 
 	if _, err := Read("claude"); err == nil || !strings.Contains(err.Error(), "unsupported record version") {
@@ -442,7 +443,7 @@ func TestReadRefusesUnsupportedRecordVersion(t *testing.T) {
 }
 
 func TestReadMigratesLegacyRecordsWithoutPrivateFields(t *testing.T) {
-	t.Setenv("VIBEUSAGE_DATA_DIR", t.TempDir())
+	testenv.SetDataDir(t.Setenv, t.TempDir())
 	legacy := testSnapshot("claude", "legacy", time.Now().Add(-2*DedupFloor))
 	legacy.Identity = &models.ProviderIdentity{Email: "private@example.com"}
 	writeRecords(t, "claude", Record{V: legacyRecordVersion, Snapshot: legacy})
@@ -473,7 +474,7 @@ func TestReadMigratesLegacyRecordsWithoutPrivateFields(t *testing.T) {
 }
 
 func TestMigrateSanitizesEveryLegacyFileAndDropsInvalidRows(t *testing.T) {
-	t.Setenv("VIBEUSAGE_DATA_DIR", t.TempDir())
+	testenv.SetDataDir(t.Setenv, t.TempDir())
 	claude := testSnapshot("claude", "legacy", time.Now().Add(-time.Hour))
 	claude.Identity = &models.ProviderIdentity{Email: "claude-private@example.com"}
 	codex := testSnapshot("wrong-provider", "invalid", time.Now().Add(-time.Hour))
@@ -505,7 +506,7 @@ func TestMigrateSanitizesEveryLegacyFileAndDropsInvalidRows(t *testing.T) {
 }
 
 func TestReadRemovesFutureDatedLegacyPrivateRecord(t *testing.T) {
-	t.Setenv("VIBEUSAGE_DATA_DIR", t.TempDir())
+	testenv.SetDataDir(t.Setenv, t.TempDir())
 	legacy := testSnapshot("claude", "future", time.Now().Add(24*time.Hour))
 	legacy.Identity = &models.ProviderIdentity{Email: "private@example.com"}
 	writeRecords(t, "claude", Record{V: legacyRecordVersion, Snapshot: legacy})
@@ -527,7 +528,7 @@ func TestReadRemovesFutureDatedLegacyPrivateRecord(t *testing.T) {
 }
 
 func TestAppendRepairsTornFinalLine(t *testing.T) {
-	t.Setenv("VIBEUSAGE_DATA_DIR", t.TempDir())
+	testenv.SetDataDir(t.Setenv, t.TempDir())
 	first := time.Now().Add(-2 * DedupFloor)
 	writeRecords(t, "claude", Record{V: CurrentRecordVersion, Snapshot: testSnapshot("claude", "first", first)})
 	file, err := os.OpenFile(historyPath("claude"), os.O_APPEND|os.O_WRONLY, 0o600)
@@ -558,7 +559,7 @@ func TestAppendRepairsTornFinalLine(t *testing.T) {
 }
 
 func TestFutureStoredTimestampIsHiddenAndDoesNotBlockCurrentAppend(t *testing.T) {
-	t.Setenv("VIBEUSAGE_DATA_DIR", t.TempDir())
+	testenv.SetDataDir(t.Setenv, t.TempDir())
 	writeRecords(t, "claude", Record{
 		V:        CurrentRecordVersion,
 		Snapshot: testSnapshot("claude", "future", time.Now().Add(24*time.Hour)),
@@ -579,7 +580,7 @@ func TestFutureStoredTimestampIsHiddenAndDoesNotBlockCurrentAppend(t *testing.T)
 }
 
 func TestReadWaitsForActiveAppendLock(t *testing.T) {
-	t.Setenv("VIBEUSAGE_DATA_DIR", t.TempDir())
+	testenv.SetDataDir(t.Setenv, t.TempDir())
 	writeRecords(t, "claude", Record{
 		V:        CurrentRecordVersion,
 		Snapshot: testSnapshot("claude", "daily", time.Now()),
@@ -633,7 +634,7 @@ func TestClearWaitsForActiveAppendLock(t *testing.T) {
 			name = "all"
 		}
 		t.Run(name, func(t *testing.T) {
-			t.Setenv("VIBEUSAGE_DATA_DIR", t.TempDir())
+			testenv.SetDataDir(t.Setenv, t.TempDir())
 			if err := os.MkdirAll(config.HistoryDir(), 0o755); err != nil {
 				t.Fatalf("creating history directory: %v", err)
 			}
@@ -676,7 +677,7 @@ func TestClearWaitsForActiveAppendLock(t *testing.T) {
 }
 
 func TestClear(t *testing.T) {
-	t.Setenv("VIBEUSAGE_DATA_DIR", t.TempDir())
+	testenv.SetDataDir(t.Setenv, t.TempDir())
 
 	for _, providerID := range []string{"claude", "codex"} {
 		if err := Append(providerID, testSnapshot(providerID, "daily", time.Now())); err != nil {

@@ -157,7 +157,7 @@ func signedInMimoCDPCookies() []cdpCookie {
 }
 
 func TestCDPFixedPortsPrecedence(t *testing.T) {
-	t.Setenv(cdpPortsEnv, "")
+	testenv.SetCDPPorts(t.Setenv, "")
 	ports, explicit := cdpFixedPorts(nil)
 	if explicit || len(ports) != 1 || ports[0] != cdpDefaultPort {
 		t.Errorf("default: ports=%v explicit=%v", ports, explicit)
@@ -168,7 +168,7 @@ func TestCDPFixedPortsPrecedence(t *testing.T) {
 		t.Errorf("config: ports=%v explicit=%v", ports, explicit)
 	}
 
-	t.Setenv(cdpPortsEnv, " 9333 , bogus, 9333 ,9222")
+	testenv.SetCDPPorts(t.Setenv, " 9333 , bogus, 9333 ,9222")
 	ports, explicit = cdpFixedPorts([]int{9444})
 	if !explicit || strings.Join(ports, ",") != "9333,9222" {
 		t.Errorf("env override: ports=%v explicit=%v", ports, explicit)
@@ -208,15 +208,14 @@ func TestDiscoverFixedPortCDPEndpointsSkipsUnreachable(t *testing.T) {
 
 func isolateCDPDiscovery(t *testing.T) {
 	t.Helper()
-	testenv.ApplyVibeusage(t.Setenv, t.TempDir())
-	t.Setenv("HOME", t.TempDir())
+	testenv.ApplyVibeusage(t, t.TempDir())
 }
 
 func TestImportMimoCDPSessionFindsSignedInBrowser(t *testing.T) {
 	isolateCDPDiscovery(t)
 	emptyPort := newFakeCDPServer(t, "Chrome/153.0", "HeadlessChrome/153", nil)
 	signedInPort := newFakeCDPServer(t, "Chrome/153.0", "Chrome/153", signedInMimoCDPCookies())
-	t.Setenv(cdpPortsEnv, emptyPort+","+signedInPort)
+	testenv.SetCDPPorts(t.Setenv, emptyPort, signedInPort)
 
 	session, err := importMimoCDPSession(context.Background())
 	if err != nil {
@@ -240,7 +239,7 @@ func TestImportMimoCDPSessionReportsEveryBrowserChecked(t *testing.T) {
 	headlessPort := newFakeCDPServer(t, "Chrome/153.0", "HeadlessChrome/153", nil)
 	headedPort := newFakeCDPServer(t, "Chrome/153.0", "Chrome/153", nil)
 	closed := reserveClosedPort(t)
-	t.Setenv(cdpPortsEnv, headlessPort+","+headedPort+","+closed)
+	testenv.SetCDPPorts(t.Setenv, headlessPort, headedPort, closed)
 
 	_, err := importMimoCDPSession(context.Background())
 	if err == nil {
@@ -264,7 +263,7 @@ func TestImportMimoCDPSessionReportsEveryBrowserChecked(t *testing.T) {
 func TestImportMimoCDPSessionNoEndpoints(t *testing.T) {
 	isolateCDPDiscovery(t)
 	closed := reserveClosedPort(t)
-	t.Setenv(cdpPortsEnv, closed)
+	testenv.SetCDPPorts(t.Setenv, closed)
 
 	_, err := importMimoCDPSession(context.Background())
 	if err == nil || !strings.Contains(err.Error(), "probed ports "+closed) {
@@ -274,13 +273,7 @@ func TestImportMimoCDPSessionNoEndpoints(t *testing.T) {
 
 func reserveClosedPort(t *testing.T) string {
 	t.Helper()
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("Listen: %v", err)
-	}
-	_, port, _ := net.SplitHostPort(listener.Addr().String())
-	_ = listener.Close()
-	return port
+	return testenv.ReserveClosedPort(t)
 }
 
 // newFakeCDPServerPageFallback mimics Chrome 154+ headed profiles: the

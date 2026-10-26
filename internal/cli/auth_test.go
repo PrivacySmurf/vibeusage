@@ -34,7 +34,7 @@ type authContextKey struct{}
 
 func TestAuthProvider_PassesCallerContextToCustomFlow(t *testing.T) {
 	tmpDir := t.TempDir()
-	testenv.ApplySameDir(t.Setenv, tmpDir)
+	testenv.ApplySameDir(t, tmpDir)
 	config.Override(t, config.DefaultConfig())
 
 	oldQuiet := quiet
@@ -99,7 +99,7 @@ func TestAuthClaude_UsesInputWithValidation(t *testing.T) {
 	// Use temp dir for credentials; disable provider CLI reuse to avoid
 	// detecting real Claude CLI credentials on the host.
 	tmpDir := t.TempDir()
-	testenv.ApplySameDir(t.Setenv, tmpDir)
+	testenv.ApplySameDir(t, tmpDir)
 	t.Setenv("ANTHROPIC_API_KEY", "")
 	config.Override(t, config.DefaultConfig())
 
@@ -131,7 +131,7 @@ func TestAuthClaude_UsesInputWithValidation(t *testing.T) {
 // rate-limit cooldown never outlives a successful (re-)authentication.
 func TestEnableProvider_ClearsStaleThrottleMarker(t *testing.T) {
 	tmpDir := t.TempDir()
-	testenv.ApplySameDir(t.Setenv, tmpDir)
+	testenv.ApplySameDir(t, tmpDir)
 	config.Override(t, config.DefaultConfig())
 
 	if err := config.SaveThrottle("claude", fetch.ThrottleMarker{
@@ -191,7 +191,7 @@ func TestAuthClaude_ManualKeyEntry_ClearsStaleThrottleMarker(t *testing.T) {
 	defer prompt.SetDefault(old)
 
 	tmpDir := t.TempDir()
-	testenv.ApplySameDir(t.Setenv, tmpDir)
+	testenv.ApplySameDir(t, tmpDir)
 	t.Setenv("ANTHROPIC_API_KEY", "")
 	config.Override(t, config.DefaultConfig())
 
@@ -236,7 +236,7 @@ func TestAuthProvider_ReusingDetectedCredentials_ClearsStaleThrottleMarker(t *te
 	defer prompt.SetDefault(old)
 
 	tmpDir := t.TempDir()
-	testenv.ApplySameDir(t.Setenv, tmpDir)
+	testenv.ApplySameDir(t, tmpDir)
 	config.Override(t, config.DefaultConfig())
 
 	var buf bytes.Buffer
@@ -294,7 +294,7 @@ func TestAuthCursor_UsesInputWithValidation(t *testing.T) {
 	defer prompt.SetDefault(old)
 
 	tmpDir := t.TempDir()
-	testenv.ApplySameDir(t.Setenv, tmpDir)
+	testenv.ApplySameDir(t, tmpDir)
 	config.Override(t, config.DefaultConfig())
 
 	var buf bytes.Buffer
@@ -314,7 +314,7 @@ func TestAuthCursor_UsesInputWithValidation(t *testing.T) {
 
 func TestAuthManualKey_ValidatesReturnedValueBeforeSaving(t *testing.T) {
 	tmpDir := t.TempDir()
-	testenv.ApplySameDir(t.Setenv, tmpDir)
+	testenv.ApplySameDir(t, tmpDir)
 	config.Override(t, config.DefaultConfig())
 
 	mock := &prompt.Mock{InputFunc: func(prompt.InputConfig) (string, error) {
@@ -363,7 +363,7 @@ func TestAuthSetCredential_PreservesManualProviderStorageContracts(t *testing.T)
 	for _, tt := range tests {
 		t.Run(tt.providerID, func(t *testing.T) {
 			tmpDir := t.TempDir()
-			testenv.ApplySameDir(t.Setenv, tmpDir)
+			testenv.ApplySameDir(t, tmpDir)
 			cfg := config.DefaultConfig()
 			disabled := false
 			cfg.Providers[tt.providerID] = config.ProviderConfig{Enabled: &disabled}
@@ -396,7 +396,7 @@ func TestAuthSetCredential_PreservesManualProviderStorageContracts(t *testing.T)
 
 func TestAuthStatusCommand_HasTableBorders(t *testing.T) {
 	tmp := t.TempDir()
-	testenv.ApplySameDir(t.Setenv, tmp)
+	testenv.ApplySameDir(t, tmp)
 	config.Override(t, config.DefaultConfig())
 
 	var buf bytes.Buffer
@@ -426,7 +426,7 @@ func TestAuthStatusCommand_HasTableBorders(t *testing.T) {
 
 func TestAuthStatusCommand_ContainsHeaders(t *testing.T) {
 	tmp := t.TempDir()
-	testenv.ApplySameDir(t.Setenv, tmp)
+	testenv.ApplySameDir(t, tmp)
 	config.Override(t, config.DefaultConfig())
 
 	var buf bytes.Buffer
@@ -457,7 +457,7 @@ func TestAuthStatusCommand_ContainsHeaders(t *testing.T) {
 
 func TestAuthStatusCommand_QuietMode(t *testing.T) {
 	tmp := t.TempDir()
-	testenv.ApplySameDir(t.Setenv, tmp)
+	testenv.ApplySameDir(t, tmp)
 	config.Override(t, config.DefaultConfig())
 
 	var buf bytes.Buffer
@@ -483,7 +483,7 @@ func TestAuthStatusCommand_QuietMode(t *testing.T) {
 func TestAuthCopilot_UsesConfirmForReauth(t *testing.T) {
 	// Set up credentials so the "already authenticated" path is hit
 	tmpDir := t.TempDir()
-	testenv.ApplySameDir(t.Setenv, tmpDir)
+	testenv.ApplySameDir(t, tmpDir)
 
 	_ = config.WriteCredential("copilot", "oauth", []byte(`{"access_token":"test"}`))
 
@@ -522,7 +522,7 @@ func TestAuthCopilot_UsesConfirmForReauth(t *testing.T) {
 
 func TestAuthSetup_DisablesAndReenablesExternalCredentials(t *testing.T) {
 	tmpDir := t.TempDir()
-	testenv.ApplySameDir(t.Setenv, tmpDir)
+	testenv.ApplySameDir(t, tmpDir)
 	t.Setenv("HOME", tmpDir)
 	t.Setenv("USERPROFILE", tmpDir)
 	for _, envVar := range []string{
@@ -610,7 +610,7 @@ func TestAuthSetup_DisablesAndReenablesExternalCredentials(t *testing.T) {
 
 func TestAuthSetup_FailedAuthKeepsProviderDisabled(t *testing.T) {
 	tmpDir := t.TempDir()
-	testenv.ApplySameDir(t.Setenv, tmpDir)
+	testenv.ApplySameDir(t, tmpDir)
 	t.Setenv("HOME", tmpDir)
 
 	cfg := config.DefaultConfig()
@@ -658,7 +658,7 @@ func slicesContain(values []string, target string) bool {
 
 func TestAuthDelete_RemovesCredentialsAndDisables(t *testing.T) {
 	tmpDir := t.TempDir()
-	testenv.ApplySameDir(t.Setenv, tmpDir)
+	testenv.ApplySameDir(t, tmpDir)
 	config.Override(t, config.DefaultConfig())
 
 	// Create credentials via the consolidated store
@@ -709,7 +709,7 @@ func TestAuthDelete_RemovesCredentialsAndDisables(t *testing.T) {
 
 func TestAuthDelete_UserDeclinesConfirm(t *testing.T) {
 	tmpDir := t.TempDir()
-	testenv.ApplySameDir(t.Setenv, tmpDir)
+	testenv.ApplySameDir(t, tmpDir)
 	config.Override(t, config.DefaultConfig())
 
 	_ = config.WriteCredential("claude", "session", []byte(`{"session_key":"test"}`))
@@ -744,7 +744,7 @@ func TestAuthDelete_UserDeclinesConfirm(t *testing.T) {
 
 func TestAuthSetCredential_SavesCredentialAndEnables(t *testing.T) {
 	tmpDir := t.TempDir()
-	testenv.ApplySameDir(t.Setenv, tmpDir)
+	testenv.ApplySameDir(t, tmpDir)
 	cfg := config.DefaultConfig()
 	disabled := false
 	cfg.Providers["cursor"] = config.ProviderConfig{Enabled: &disabled}
@@ -781,7 +781,7 @@ func TestAuthSetCredential_SavesCredentialAndEnables(t *testing.T) {
 
 func TestAuthSetCredential_ValidatesInput(t *testing.T) {
 	tmpDir := t.TempDir()
-	testenv.ApplySameDir(t.Setenv, tmpDir)
+	testenv.ApplySameDir(t, tmpDir)
 	t.Setenv("ANTHROPIC_API_KEY", "")
 	config.Override(t, config.DefaultConfig())
 
@@ -800,7 +800,7 @@ func TestAuthSetCredential_ValidatesInput(t *testing.T) {
 
 func TestAuthSetCredential_RejectsEmpty(t *testing.T) {
 	tmpDir := t.TempDir()
-	testenv.ApplySameDir(t.Setenv, tmpDir)
+	testenv.ApplySameDir(t, tmpDir)
 	config.Override(t, config.DefaultConfig())
 
 	var buf bytes.Buffer
@@ -818,7 +818,7 @@ func TestAuthSetCredential_RejectsCustomAuthFlowProvider(t *testing.T) {
 	// Codex uses a CustomAuthFlow that defers to the Codex CLI; --token has no
 	// usable destination and must not write a credential fetch ignores.
 	tmpDir := t.TempDir()
-	testenv.ApplySameDir(t.Setenv, tmpDir)
+	testenv.ApplySameDir(t, tmpDir)
 	config.Override(t, config.DefaultConfig())
 
 	var buf bytes.Buffer
@@ -842,7 +842,7 @@ func TestAuthSetCredential_AcceptsKimiCodeViaCredentialAcceptor(t *testing.T) {
 	// KimiCode advertises a DeviceAuthFlow but also supports a stored API
 	// key via APIKeyStrategy; CredentialAcceptor routes stdin to the apikey slot.
 	tmpDir := t.TempDir()
-	testenv.ApplySameDir(t.Setenv, tmpDir)
+	testenv.ApplySameDir(t, tmpDir)
 	t.Setenv("KIMI_CODE_API_KEY", "")
 	config.Override(t, config.DefaultConfig())
 
@@ -883,7 +883,7 @@ func TestReadCredential(t *testing.T) {
 
 func TestAuthSetCredential_RejectsCookieAssignment(t *testing.T) {
 	tmpDir := t.TempDir()
-	testenv.ApplySameDir(t.Setenv, tmpDir)
+	testenv.ApplySameDir(t, tmpDir)
 	config.Override(t, config.DefaultConfig())
 
 	p, _ := provider.Get("opencode")
@@ -904,7 +904,7 @@ func TestAuthCredentialFlagReadsFromStdin(t *testing.T) {
 	}
 
 	tmpDir := t.TempDir()
-	testenv.ApplySameDir(t.Setenv, tmpDir)
+	testenv.ApplySameDir(t, tmpDir)
 	t.Setenv("OPENROUTER_API_KEY", "")
 	config.Override(t, config.DefaultConfig())
 
@@ -938,7 +938,7 @@ func TestAuthCredentialFlagReadsFromStdin(t *testing.T) {
 
 func TestAuthCredentialFlagAcceptsDirectValue(t *testing.T) {
 	tmpDir := t.TempDir()
-	testenv.ApplySameDir(t.Setenv, tmpDir)
+	testenv.ApplySameDir(t, tmpDir)
 	t.Setenv("OPENROUTER_API_KEY", "")
 	config.Override(t, config.DefaultConfig())
 
@@ -979,7 +979,7 @@ func TestAuthCredentialFlagAcceptsDirectValue(t *testing.T) {
 
 func TestAuthStatusJSON_UsesTypedStruct(t *testing.T) {
 	tmp := t.TempDir()
-	testenv.ApplySameDir(t.Setenv, tmp)
+	testenv.ApplySameDir(t, tmp)
 	config.Override(t, config.DefaultConfig())
 
 	var buf bytes.Buffer
@@ -1040,7 +1040,7 @@ func executeAuthCLI(t *testing.T, stdin string, cliArgs ...string) (string, erro
 
 func TestAuthModelStudioCodeFlag(t *testing.T) {
 	tmp := t.TempDir()
-	testenv.ApplySameDir(t.Setenv, tmp)
+	testenv.ApplySameDir(t, tmp)
 	config.Override(t, config.DefaultConfig())
 
 	t.Run("direct_flag_value", func(t *testing.T) {
@@ -1091,7 +1091,7 @@ func TestAuthModelStudioCodeFlag(t *testing.T) {
 
 func TestR1_3_AuthCodeFlagFirstNeverEchoesDigits(t *testing.T) {
 	tmp := t.TempDir()
-	testenv.ApplySameDir(t.Setenv, tmp)
+	testenv.ApplySameDir(t, tmp)
 	config.Override(t, config.DefaultConfig())
 
 	t.Run("flag_first_modelstudio_delivers_without_echoing", func(t *testing.T) {
@@ -1132,7 +1132,7 @@ func TestR1_3_AuthCodeFlagFirstNeverEchoesDigits(t *testing.T) {
 
 func TestR1_5_AuthCodeSpaceFormStdinThroughFlagParser(t *testing.T) {
 	tmp := t.TempDir()
-	testenv.ApplySameDir(t.Setenv, tmp)
+	testenv.ApplySameDir(t, tmp)
 	config.Override(t, config.DefaultConfig())
 
 	for _, tc := range []struct {

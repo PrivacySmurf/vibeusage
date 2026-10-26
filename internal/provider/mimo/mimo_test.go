@@ -12,6 +12,7 @@ import (
 
 	"github.com/joshuadavidthomas/vibeusage/internal/models"
 	"github.com/joshuadavidthomas/vibeusage/internal/provider"
+	"github.com/joshuadavidthomas/vibeusage/internal/testenv"
 )
 
 func TestMimo_Metadata(t *testing.T) {
@@ -53,6 +54,7 @@ func TestMimo_ValidateCookie(t *testing.T) {
 }
 
 func TestMimo_AcceptCredential(t *testing.T) {
+	testenv.ApplyVibeusage(t, t.TempDir())
 	m := Mimo{}
 
 	err := m.AcceptCredential("")
@@ -67,6 +69,7 @@ func TestMimo_AcceptCredential(t *testing.T) {
 }
 
 func TestWebConsoleStrategy_FetchSuccess(t *testing.T) {
+	testenv.ApplyVibeusage(t, t.TempDir())
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		assert.Contains(t, r.Header.Get("Cookie"), "api-platform_serviceToken=test")
 
@@ -154,6 +157,7 @@ func TestWebConsoleStrategy_FetchSuccess(t *testing.T) {
 }
 
 func TestWebConsoleStrategy_Unauthorized(t *testing.T) {
+	testenv.ApplyVibeusage(t, t.TempDir())
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusUnauthorized)
 	}))

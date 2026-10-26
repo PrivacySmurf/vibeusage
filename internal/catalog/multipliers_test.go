@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/joshuadavidthomas/vibeusage/internal/config"
+	"github.com/joshuadavidthomas/vibeusage/internal/testenv"
 )
 
 func TestParseMultipliersYAML(t *testing.T) {
@@ -179,7 +180,7 @@ func TestParseGoMultipliersRejectsPartialTable(t *testing.T) {
 }
 
 func TestMultiplierCacheBundlesProviders(t *testing.T) {
-	t.Setenv("VIBEUSAGE_CACHE_DIR", t.TempDir())
+	testenv.SetCacheDir(t.Setenv, t.TempDir())
 	want := multiplierCatalog{
 		copilotMultiplierProvider:  {"GPT-5": 2},
 		opencodeMultiplierProvider: {"Grok 4.5": 4},
@@ -209,7 +210,7 @@ func TestLoadMultipliersDoesNotCachePartialRefresh(t *testing.T) {
 	server := partialMultiplierServer(t)
 	defer server.Close()
 	setMultiplierURLs(t, server.URL+"/copilot", server.URL+"/opencode")
-	t.Setenv("VIBEUSAGE_CACHE_DIR", t.TempDir())
+	testenv.SetCacheDir(t.Setenv, t.TempDir())
 
 	catalog, err := loadMultipliers(context.Background())
 	if err != nil {
@@ -227,7 +228,7 @@ func TestLoadMultipliersKeepsStaleCacheAfterPartialRefresh(t *testing.T) {
 	server := partialMultiplierServer(t)
 	defer server.Close()
 	setMultiplierURLs(t, server.URL+"/copilot", server.URL+"/opencode")
-	t.Setenv("VIBEUSAGE_CACHE_DIR", t.TempDir())
+	testenv.SetCacheDir(t.Setenv, t.TempDir())
 
 	staleCatalog := multiplierCatalog{
 		copilotMultiplierProvider:  {"GPT-5": 1},

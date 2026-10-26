@@ -23,16 +23,12 @@ import (
 
 const parkTestCookie = "login_aliyunid_ticket=imported; login_current_pk=account"
 
-// isolateParkFixture keeps our own new fixtures off native Chrome discovery:
-// HOME scratch, MODELSTUDIO_COOKIE/VIBEUSAGE_ALLOW_KEYCHAIN/cdpPortsEnv
-// cleared, plus testenv.ApplyVibeusage.
+// isolateParkFixture keeps our own new fixtures off native Chrome discovery
+// via testenv.ApplyVibeusage and clears MODELSTUDIO_COOKIE.
 func isolateParkFixture(t *testing.T) {
 	t.Helper()
-	testenv.ApplyVibeusage(t.Setenv, t.TempDir())
-	t.Setenv("HOME", t.TempDir())
+	testenv.ApplyVibeusage(t, t.TempDir())
 	t.Setenv("MODELSTUDIO_COOKIE", "")
-	t.Setenv("VIBEUSAGE_ALLOW_KEYCHAIN", "")
-	t.Setenv(cdpPortsEnv, "")
 }
 
 // parkRig wires a strategy against fakes only: a session server whose health
@@ -62,7 +58,7 @@ func newParkRig(t *testing.T, kind loginBlockerKind) *parkRig {
 	})
 	rig.strategy = newTestStrategy(server.URL)
 
-	t.Setenv(cdpPortsEnv, "")
+	testenv.SetCDPPorts(t.Setenv, "")
 	cfg := config.DefaultConfig()
 	cfg.Providers["modelstudio"] = config.ProviderConfig{
 		CDPPorts:  []int{9444, 9222},
@@ -1040,7 +1036,7 @@ func TestParkExtendTimeoutReturnsBaseWhileParked(t *testing.T) {
 }
 
 func TestParkMarkerCorruptCountsAsParked(t *testing.T) {
-	testenv.ApplyVibeusage(t.Setenv, t.TempDir())
+	testenv.ApplyVibeusage(t, t.TempDir())
 	if _, parked := loadLoginPark(); parked {
 		t.Fatal("no marker should not be parked")
 	}
@@ -1062,8 +1058,8 @@ func TestParkMarkerCorruptCountsAsParked(t *testing.T) {
 }
 
 func TestParkGuidancePort(t *testing.T) {
-	testenv.ApplyVibeusage(t.Setenv, t.TempDir())
-	t.Setenv(cdpPortsEnv, "")
+	testenv.ApplyVibeusage(t, t.TempDir())
+	testenv.SetCDPPorts(t.Setenv, "")
 	t.Cleanup(func() { config.SetGlobal(config.DefaultConfig()) })
 	set := func(pc config.ProviderConfig) {
 		cfg := config.DefaultConfig()
@@ -1149,7 +1145,7 @@ func TestDiagnoseAutoLoginNotParked(t *testing.T) {
 		}
 	})
 	t.Run("unconfigured", func(t *testing.T) {
-		testenv.ApplyVibeusage(t.Setenv, t.TempDir())
+		testenv.ApplyVibeusage(t, t.TempDir())
 		config.SetGlobal(config.DefaultConfig())
 		d := diagnoseModelStudioAutoLogin()
 		if d.Status != provider.DiagInfo || !strings.Contains(d.Detail, "not configured") {
@@ -1256,7 +1252,7 @@ func TestParkInitialBlockerFetchNeverRetries(t *testing.T) {
 			}
 
 			counter := filepath.Join(t.TempDir(), "login-command-runs")
-			t.Setenv(cdpPortsEnv, "")
+			testenv.SetCDPPorts(t.Setenv, "")
 			cfg := config.DefaultConfig()
 			cfg.Providers["modelstudio"] = config.ProviderConfig{
 				CDPPorts:  []int{port},

@@ -3,9 +3,11 @@ package cli
 import (
 	"bytes"
 	"context"
+	"net"
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/joshuadavidthomas/vibeusage/internal/config"
 	"github.com/joshuadavidthomas/vibeusage/internal/provider"
@@ -45,7 +47,7 @@ func captureDiagnose(t *testing.T, fn func() error) string {
 }
 
 func TestAuthDiagnoseRequiresProviderArg(t *testing.T) {
-	testenv.ApplySameDir(t.Setenv, t.TempDir())
+	testenv.ApplySameDir(t, t.TempDir())
 	config.Override(t, config.DefaultConfig())
 
 	if err := authCmd.Flags().Set("diagnose", "true"); err != nil {
@@ -60,7 +62,7 @@ func TestAuthDiagnoseRequiresProviderArg(t *testing.T) {
 }
 
 func TestAuthDiagnoseUnknownProvider(t *testing.T) {
-	testenv.ApplySameDir(t.Setenv, t.TempDir())
+	testenv.ApplySameDir(t, t.TempDir())
 	config.Override(t, config.DefaultConfig())
 
 	if err := authCmd.Flags().Set("diagnose", "true"); err != nil {
@@ -75,7 +77,7 @@ func TestAuthDiagnoseUnknownProvider(t *testing.T) {
 }
 
 func TestAuthDiagnoseProviderWithoutDiagnoser(t *testing.T) {
-	testenv.ApplySameDir(t.Setenv, t.TempDir())
+	testenv.ApplySameDir(t, t.TempDir())
 	config.Override(t, config.DefaultConfig())
 
 	p := diagProviderWithoutDiagnoser{}
@@ -95,7 +97,7 @@ func TestAuthDiagnoseProviderWithoutDiagnoser(t *testing.T) {
 }
 
 func TestAuthDiagnoseProviderWithDiagnoser(t *testing.T) {
-	testenv.ApplySameDir(t.Setenv, t.TempDir())
+	testenv.ApplySameDir(t, t.TempDir())
 	config.Override(t, config.DefaultConfig())
 	t.Setenv("FAKE_DIAG_VAR", "set")
 
@@ -120,5 +122,32 @@ func TestAuthDiagnoseProviderWithDiagnoser(t *testing.T) {
 		if !strings.Contains(output, want) {
 			t.Errorf("output missing %q:\n%s", want, output)
 		}
+	}
+}
+
+func TestRunAuthDiagnose_PinsDiscoveryEnv(t *testing.T) {
+	dirs := testenv.ApplyVibeusage(t, t.TempDir())
+	config.Override(t, config.DefaultConfig())
+
+	if dirs.CDPPort == "" {
+		t.Fatal("dirs.CDPPort is empty")
+	}
+	conn, err := net.DialTimeout("tcp", "127.0.0.1:"+dirs.CDPPort, 200*time.Millisecond)
+	if err == nil {
+		_ = conn.Close()
+		t.Fatalf("expected closed loopback port %s to fail dial", dirs.CDPPort)
+	}
+	if got := os.Getenv("HOME"); got != dirs.Home {
+		t.Fatalf("HOME = %q, want %q", got, dirs.Home)
+	}
+
+	p := diagFakeProvider{diags: []provider.Diagnostic{
+		{Name: "CDP :" + dirs.CDPPort, Status: provider.DiagFail, Detail: "unreachable: connection refused"},
+	}}
+	output := captureDiagnose(t, func() error {
+		return authDiagnoseProvider(context.Background(), "diag-pinned", p)
+	})
+	if !strings.Contains(output, "CDP :"+dirs.CDPPort) {
+		t.Errorf("output missing pinned CDP port %s in:\n%s", dirs.CDPPort, output)
 	}
 }

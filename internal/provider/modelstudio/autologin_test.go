@@ -88,7 +88,7 @@ func TestLoadLoginCredentialsRunsCommand(t *testing.T) {
 }
 
 func TestAutoLoginSettings(t *testing.T) {
-	t.Setenv(cdpPortsEnv, "")
+	testenv.SetCDPPorts(t.Setenv, "")
 	setProviderConfig := func(pc config.ProviderConfig) {
 		cfg := config.DefaultConfig()
 		cfg.Providers["modelstudio"] = pc
@@ -118,7 +118,7 @@ func TestAutoLoginSettings(t *testing.T) {
 }
 
 func TestWebConsoleFetchAutoLogsInWhenNoBrowserSession(t *testing.T) {
-	testenv.ApplyVibeusage(t.Setenv, t.TempDir())
+	testenv.ApplyVibeusage(t, t.TempDir())
 	server := newModelStudioSessionServer(t, func(string) string { return successfulSummaryPayload() })
 	useAutoLoginConfig(t)
 
@@ -153,7 +153,7 @@ func TestWebConsoleFetchAutoLogsInWhenNoBrowserSession(t *testing.T) {
 }
 
 func TestWebConsoleFetchAutoLogsInWhenBrowserSessionExpired(t *testing.T) {
-	testenv.ApplyVibeusage(t.Setenv, t.TempDir())
+	testenv.ApplyVibeusage(t, t.TempDir())
 	server := newModelStudioSessionServer(t, func(cookie string) string {
 		if strings.Contains(cookie, "login_aliyunid_ticket=fresh") {
 			return successfulSummaryPayload()
@@ -184,7 +184,7 @@ func TestWebConsoleFetchAutoLogsInWhenBrowserSessionExpired(t *testing.T) {
 }
 
 func TestWebConsoleFetchReportsAutoLoginFailureOnce(t *testing.T) {
-	testenv.ApplyVibeusage(t.Setenv, t.TempDir())
+	testenv.ApplyVibeusage(t, t.TempDir())
 	server := newModelStudioSessionServer(t, func(string) string { return expiredSessionPayload() })
 	useAutoLoginConfig(t)
 
@@ -215,7 +215,7 @@ func TestWebConsoleFetchReportsAutoLoginFailureOnce(t *testing.T) {
 }
 
 func TestWebConsoleFetchSkipsAutoLoginWhenUnconfigured(t *testing.T) {
-	testenv.ApplyVibeusage(t.Setenv, t.TempDir())
+	testenv.ApplyVibeusage(t, t.TempDir())
 	server := newModelStudioSessionServer(t, func(string) string { return successfulSummaryPayload() })
 	config.SetGlobal(config.DefaultConfig())
 
@@ -413,7 +413,7 @@ func TestClassifyLoginBlocker(t *testing.T) {
 
 func useAutoLoginConfig(t *testing.T) {
 	t.Helper()
-	t.Setenv(cdpPortsEnv, "")
+	testenv.SetCDPPorts(t.Setenv, "")
 	cfg := config.DefaultConfig()
 	cfg.Providers["modelstudio"] = config.ProviderConfig{
 		CDPPorts:     []int{9444, 9222},
@@ -524,9 +524,7 @@ func (f *fakeLoginChrome) blocked() bool {
 
 func newFakeLoginChrome(t *testing.T) *fakeLoginChrome {
 	t.Helper()
-	if os.Getenv("VIBEUSAGE_CACHE_DIR") == "" {
-		t.Setenv("VIBEUSAGE_CACHE_DIR", t.TempDir())
-	}
+	testenv.EnsureCacheDir(t.Setenv, t.TempDir)
 	oldSettle, oldRedirect, oldCookieWait, oldVerifyWait, oldSleep := loginFormSettle, loginRedirectWait, loginCookieWait, loginVerificationWait, loginSleep
 	loginFormSettle, loginRedirectWait, loginCookieWait, loginVerificationWait = 10*time.Millisecond, 300*time.Millisecond, 300*time.Millisecond, 300*time.Millisecond
 	loginSleep = func(ctx context.Context, _ time.Duration) error { return ctx.Err() }
@@ -842,7 +840,7 @@ func (f *fakeLoginChrome) evaluate(expr string, contextID int) (any, func()) {
 }
 
 func TestWebConsoleFetchHonorsLoginCooldown(t *testing.T) {
-	testenv.ApplyVibeusage(t.Setenv, t.TempDir())
+	testenv.ApplyVibeusage(t, t.TempDir())
 	server := newModelStudioSessionServer(t, func(string) string { return successfulSummaryPayload() })
 	useAutoLoginConfig(t)
 	stubImporter(t, func(context.Context) (browserSession, error) {
@@ -875,7 +873,7 @@ func TestWebConsoleFetchHonorsLoginCooldown(t *testing.T) {
 }
 
 func TestWebConsoleStrategyExtendsTimeoutOnlyWithAutoLogin(t *testing.T) {
-	testenv.ApplyVibeusage(t.Setenv, t.TempDir())
+	testenv.ApplyVibeusage(t, t.TempDir())
 	strategy := &WebConsoleStrategy{}
 
 	config.SetGlobal(config.DefaultConfig())

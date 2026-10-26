@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -29,7 +30,7 @@ func findDiag(t *testing.T, diags []provider.Diagnostic, name string) provider.D
 
 func TestDiagnoseStoredSessionStates(t *testing.T) {
 	t.Run("missing session fails", func(t *testing.T) {
-		testenv.ApplyVibeusage(t.Setenv, t.TempDir())
+		testenv.ApplyVibeusage(t, t.TempDir())
 		d := diagnoseMimoStoredSession()
 		if d.Status != provider.DiagFail {
 			t.Fatalf("want fail, got %q (%s)", d.Status, d.Detail)
@@ -37,7 +38,7 @@ func TestDiagnoseStoredSessionStates(t *testing.T) {
 	})
 
 	t.Run("signed-in session is ok and lists names", func(t *testing.T) {
-		testenv.ApplyVibeusage(t.Setenv, t.TempDir())
+		testenv.ApplyVibeusage(t, t.TempDir())
 		creds := sessionCredentials{
 			Cookie:    "api-platform_serviceToken=secret-token; userId=secret-id; cna=other",
 			Source:    sessionSourceBrowser,
@@ -66,7 +67,7 @@ func TestDiagnoseStoredSessionStates(t *testing.T) {
 	})
 
 	t.Run("session without service token warns", func(t *testing.T) {
-		testenv.ApplyVibeusage(t.Setenv, t.TempDir())
+		testenv.ApplyVibeusage(t, t.TempDir())
 		data, err := json.Marshal(sessionCredentials{
 			Cookie: "cna=other",
 			Source: sessionSourceManual,
@@ -90,8 +91,8 @@ func TestDiagnoseStoredSessionStates(t *testing.T) {
 
 func TestDiagnoseCDPJars(t *testing.T) {
 	t.Run("unreachable port fails", func(t *testing.T) {
-		testenv.ApplyVibeusage(t.Setenv, t.TempDir())
-		t.Setenv(cdpPortsEnv, "9499")
+		dirs := testenv.ApplyVibeusage(t, t.TempDir())
+		t.Cleanup(func() { _ = dirs.Close() })
 		diags := diagnoseMimoCDPJars(context.Background())
 		if len(diags) != 1 {
 			t.Fatalf("want 1 diagnostic, got %d: %+v", len(diags), diags)
@@ -102,14 +103,14 @@ func TestDiagnoseCDPJars(t *testing.T) {
 	})
 
 	t.Run("reachable jar lists names without values", func(t *testing.T) {
-		testenv.ApplyVibeusage(t.Setenv, t.TempDir())
+		testenv.ApplyVibeusage(t, t.TempDir())
 		future := float64(time.Now().Add(time.Hour).Unix())
 		port := newFakeCDPServer(t, "Chrome/154.0", "Chrome/154.0", []cdpCookie{
 			{Name: "api-platform_serviceToken", Value: "jar-secret-token", Domain: ".xiaomimimo.com", Expires: future},
 			{Name: "userId", Value: "jar-secret-id", Domain: ".xiaomi.com", Expires: future},
 			{Name: "unrelated", Value: "jar-unrelated", Domain: "example.com", Expires: future},
 		})
-		t.Setenv(cdpPortsEnv, port)
+		testenv.SetCDPPorts(t.Setenv, port)
 
 		diags := diagnoseMimoCDPJars(context.Background())
 		if len(diags) != 1 {
@@ -132,11 +133,11 @@ func TestDiagnoseCDPJars(t *testing.T) {
 	})
 
 	t.Run("browser-level rejection falls back to page target", func(t *testing.T) {
-		testenv.ApplyVibeusage(t.Setenv, t.TempDir())
+		testenv.ApplyVibeusage(t, t.TempDir())
 		port := newFakeCDPServerPageFallback(t, []cdpCookie{
 			{Name: "api-platform_serviceToken", Value: "s", Domain: ".xiaomimimo.com"},
 		})
-		t.Setenv(cdpPortsEnv, port)
+		testenv.SetCDPPorts(t.Setenv, port)
 
 		diags := diagnoseMimoCDPJars(context.Background())
 		if len(diags) != 1 {
@@ -151,8 +152,8 @@ func TestDiagnoseCDPJars(t *testing.T) {
 	})
 
 	t.Run("no ports probed warns", func(t *testing.T) {
-		testenv.ApplyVibeusage(t.Setenv, t.TempDir())
-		t.Setenv(cdpPortsEnv, "bogus")
+		testenv.ApplyVibeusage(t, t.TempDir())
+		testenv.SetCDPPorts(t.Setenv, "bogus")
 		diags := diagnoseMimoCDPJars(context.Background())
 		if len(diags) != 1 || diags[0].Status != provider.DiagWarn {
 			t.Fatalf("want single warn, got %+v", diags)
@@ -161,7 +162,7 @@ func TestDiagnoseCDPJars(t *testing.T) {
 }
 
 func TestDiagnoseThrottleAndCooldown(t *testing.T) {
-	testenv.ApplyVibeusage(t.Setenv, t.TempDir())
+	testenv.ApplyVibeusage(t, t.TempDir())
 
 	d := diagnoseMimoThrottle()
 	if d.Status != provider.DiagInfo || !strings.Contains(d.Detail, "no active throttle") {
@@ -228,16 +229,33 @@ func TestDiagnoseThrottleAndCooldown(t *testing.T) {
 }
 
 func TestDiagnoseFullReport(t *testing.T) {
-	testenv.ApplyVibeusage(t.Setenv, t.TempDir())
-	t.Setenv(cdpPortsEnv, "9499")
+	dirs := testenv.ApplyVibeusage(t, t.TempDir())
+	t.Cleanup(func() { _ = dirs.Close() })
 
 	diags := (Mimo{}).DiagnoseAuth(context.Background())
 	for _, want := range []string{
-		"Environment cookie", "Stored session", "CDP :9499",
+		"Environment cookie", "Stored session", "CDP :" + dirs.CDPPort,
 		"Browser profiles", "Throttle", "Auto-login cooldown",
 	} {
 		findDiag(t, diags, want)
 	}
+}
+
+func TestDiagnoseFixture_PinsDiscoveryInputs(t *testing.T) {
+	dirs := testenv.ApplyVibeusage(t, t.TempDir())
+	if dirs.CDPPort == "" {
+		t.Fatal("expected non-empty closed loopback CDPPort")
+	}
+	conn, err := net.DialTimeout("tcp", "127.0.0.1:"+dirs.CDPPort, 200*time.Millisecond)
+	if err == nil {
+		_ = conn.Close()
+		t.Fatalf("expected closed loopback port %s to fail dial", dirs.CDPPort)
+	}
+	if got := os.Getenv("HOME"); got != dirs.Home {
+		t.Fatalf("HOME = %q, want %q", got, dirs.Home)
+	}
+	diags := (Mimo{}).DiagnoseAuth(context.Background())
+	findDiag(t, diags, "CDP :"+dirs.CDPPort)
 }
 
 func TestMimoCookieHeaderNames(t *testing.T) {

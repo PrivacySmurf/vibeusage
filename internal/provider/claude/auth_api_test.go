@@ -9,7 +9,7 @@ import (
 )
 
 func TestSaveClaudeCredential_SessionKey(t *testing.T) {
-	testenv.ApplyVibeusage(t.Setenv, t.TempDir())
+	testenv.ApplyVibeusage(t, t.TempDir())
 	config.Override(t, config.DefaultConfig())
 
 	sessionKey := fakeClaudeSessionKey("test")

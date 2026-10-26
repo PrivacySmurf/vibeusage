@@ -8,6 +8,8 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/joshuadavidthomas/vibeusage/internal/testenv"
 )
 
 // installFakeSecurity writes a fake `security` executable into a temp dir
@@ -26,6 +28,7 @@ func installFakeSecurity(t *testing.T, body string) (argsFile string) {
 		t.Fatalf("write fake security: %v", err)
 	}
 
+	testenv.SetAllowKeychainValue(t.Setenv, "")
 	t.Setenv("KEYCHAIN_TEST_ARGS_FILE", argsFile)
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	return argsFile
@@ -113,5 +116,49 @@ func TestReadGenericPassword_Timeout(t *testing.T) {
 	}
 	if got != "" {
 		t.Errorf("got %q, want empty string", got)
+	}
+}
+
+func TestReadGenericPassword_KeychainGateDisabledVariants(t *testing.T) {
+	for _, raw := range []string{"0", "false", "FALSE", " False ", "\t0\n"} {
+		t.Run(strings.TrimSpace(raw)+"_"+raw, func(t *testing.T) {
+			argsFile := installFakeSecurity(t, "printf 'should-not-run\\n'\n")
+			testenv.SetAllowKeychainValue(t.Setenv, raw)
+
+			got, err := ReadGenericPassword("com.example.service", "acct")
+			if err == nil {
+				t.Fatalf("ReadGenericPassword with raw=%q succeeded (%q), want disabled error", raw, got)
+			}
+			if !strings.Contains(err.Error(), "keychain access disabled") {
+				t.Fatalf("ReadGenericPassword error = %q, want disabled message", err.Error())
+			}
+			if got != "" {
+				t.Fatalf("got secret %q, want empty string", got)
+			}
+			if _, statErr := os.Stat(argsFile); !os.IsNotExist(statErr) {
+				t.Fatalf("expected fake security not to run for raw=%q, but argsFile stat returned %v", raw, statErr)
+			}
+		})
+	}
+}
+
+func TestReadGenericPassword_KeychainGateEnabledAndUnsetVariants(t *testing.T) {
+	for _, raw := range []string{"", "1", "true"} {
+		t.Run("raw_"+raw, func(t *testing.T) {
+			argsFile := installFakeSecurity(t, "printf 'secret\\n'\n")
+			testenv.SetAllowKeychainValue(t.Setenv, raw)
+
+			got, err := ReadGenericPassword("com.example.service", "acct")
+			if err != nil {
+				t.Fatalf("ReadGenericPassword with raw=%q failed: %v", raw, err)
+			}
+			if got != "secret" {
+				t.Fatalf("got %q, want %q", got, "secret")
+			}
+			want := []string{"find-generic-password", "-s", "com.example.service", "-a", "acct", "-w"}
+			if args := readRecordedArgs(t, argsFile); !slices.Equal(args, want) {
+				t.Fatalf("args = %v, want %v", args, want)
+			}
+		})
 	}
 }

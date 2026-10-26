@@ -5,9 +5,12 @@ import (
 	"testing"
 
 	"github.com/joshuadavidthomas/vibeusage/internal/models"
+	"github.com/joshuadavidthomas/vibeusage/internal/testenv"
 )
 
 func TestAPIKeyStrategy_IsAvailable_EnvVar(t *testing.T) {
+	dirs := testenv.ApplyVibeusage(t, t.TempDir())
+	t.Cleanup(func() { _ = dirs.Close() })
 	t.Setenv("MINIMAX_API_KEY", "sk-cp-test")
 	s := &APIKeyStrategy{}
 	if !s.IsAvailable() {
@@ -16,18 +19,25 @@ func TestAPIKeyStrategy_IsAvailable_EnvVar(t *testing.T) {
 }
 
 func TestAPIKeyStrategy_IsAvailable_NoEnvVar(t *testing.T) {
+	dirs := testenv.ApplyVibeusage(t, t.TempDir())
+	t.Cleanup(func() { _ = dirs.Close() })
 	t.Setenv("MINIMAX_API_KEY", "")
 	s := &APIKeyStrategy{}
-	if minimaxAPIKey.Load() == "" && s.IsAvailable() {
+	if got := minimaxAPIKey.Load(); got != "" {
+		t.Fatalf("minimaxAPIKey.Load() = %q, want empty in isolated fixture", got)
+	}
+	if s.IsAvailable() {
 		t.Error("IsAvailable() = true, want false when no token available")
 	}
 }
 
 func TestAPIKeyStrategy_Fetch_NoToken(t *testing.T) {
+	dirs := testenv.ApplyVibeusage(t, t.TempDir())
+	t.Cleanup(func() { _ = dirs.Close() })
 	t.Setenv("MINIMAX_API_KEY", "")
 	s := &APIKeyStrategy{}
-	if minimaxAPIKey.Load() != "" {
-		t.Skip("credential file present — skipping no-token test")
+	if got := minimaxAPIKey.Load(); got != "" {
+		t.Fatalf("minimaxAPIKey.Load() = %q, want empty in isolated fixture", got)
 	}
 
 	result, err := s.Fetch(context.Background())

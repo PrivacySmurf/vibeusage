@@ -12,6 +12,7 @@ import (
 
 	"github.com/joshuadavidthomas/vibeusage/internal/fetch"
 	"github.com/joshuadavidthomas/vibeusage/internal/models"
+	"github.com/joshuadavidthomas/vibeusage/internal/testenv"
 )
 
 // Helpers
@@ -19,9 +20,9 @@ import (
 func setupTempDir(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
-	t.Setenv("VIBEUSAGE_CONFIG_DIR", filepath.Join(dir, "config"))
-	t.Setenv("VIBEUSAGE_DATA_DIR", filepath.Join(dir, "data"))
-	t.Setenv("VIBEUSAGE_CACHE_DIR", filepath.Join(dir, "cache"))
+	testenv.SetConfigDir(t.Setenv, filepath.Join(dir, "config"))
+	testenv.SetDataDir(t.Setenv, filepath.Join(dir, "data"))
+	testenv.SetCacheDir(t.Setenv, filepath.Join(dir, "cache"))
 	// Reset global config so tests don't leak state.
 	configMu.Lock()
 	globalConfig = nil
@@ -707,7 +708,7 @@ timeout = 15.0
 
 func TestConfigDir_EnvOverride(t *testing.T) {
 	want := filepath.Join(t.TempDir(), "custom", "config")
-	t.Setenv("VIBEUSAGE_CONFIG_DIR", want)
+	testenv.SetConfigDir(t.Setenv, want)
 	got := ConfigDir()
 	if got != want {
 		t.Errorf("ConfigDir() = %q, want %q", got, want)
@@ -716,7 +717,7 @@ func TestConfigDir_EnvOverride(t *testing.T) {
 
 func TestCacheDir_EnvOverride(t *testing.T) {
 	want := filepath.Join(t.TempDir(), "custom", "cache")
-	t.Setenv("VIBEUSAGE_CACHE_DIR", want)
+	testenv.SetCacheDir(t.Setenv, want)
 	got := CacheDir()
 	if got != want {
 		t.Errorf("CacheDir() = %q, want %q", got, want)
@@ -725,7 +726,7 @@ func TestCacheDir_EnvOverride(t *testing.T) {
 
 func TestDataDir_EnvOverride(t *testing.T) {
 	want := filepath.Join(t.TempDir(), "custom", "data")
-	t.Setenv("VIBEUSAGE_DATA_DIR", want)
+	testenv.SetDataDir(t.Setenv, want)
 	got := DataDir()
 	if got != want {
 		t.Errorf("DataDir() = %q, want %q", got, want)
@@ -734,11 +735,11 @@ func TestDataDir_EnvOverride(t *testing.T) {
 
 func TestDataDir_DoesNotFallBackToConfigDirEnv(t *testing.T) {
 	configDir := filepath.Join(t.TempDir(), "custom", "config")
-	t.Setenv("VIBEUSAGE_CONFIG_DIR", configDir)
-	t.Setenv("VIBEUSAGE_DATA_DIR", "")
+	testenv.SetConfigDir(t.Setenv, configDir)
+	testenv.SetDataDir(t.Setenv, "")
 	got := DataDir()
 	if got == configDir {
-		t.Fatalf("DataDir() should not fall back to VIBEUSAGE_CONFIG_DIR")
+		t.Fatalf("DataDir() should not fall back to config dir override")
 	}
 	if filepath.Base(got) != "vibeusage" {
 		t.Errorf("DataDir() = %q, should end with 'vibeusage'", got)
@@ -746,7 +747,7 @@ func TestDataDir_DoesNotFallBackToConfigDirEnv(t *testing.T) {
 }
 
 func TestConfigDir_DefaultContainsVibeusage(t *testing.T) {
-	t.Setenv("VIBEUSAGE_CONFIG_DIR", "")
+	testenv.SetConfigDir(t.Setenv, "")
 	got := ConfigDir()
 	if filepath.Base(got) != "vibeusage" {
 		t.Errorf("ConfigDir() = %q, should end with 'vibeusage'", got)
@@ -754,7 +755,7 @@ func TestConfigDir_DefaultContainsVibeusage(t *testing.T) {
 }
 
 func TestCacheDir_DefaultContainsVibeusage(t *testing.T) {
-	t.Setenv("VIBEUSAGE_CACHE_DIR", "")
+	testenv.SetCacheDir(t.Setenv, "")
 	got := CacheDir()
 	if filepath.Base(got) != "vibeusage" {
 		t.Errorf("CacheDir() = %q, should end with 'vibeusage'", got)
@@ -766,9 +767,9 @@ func TestSubdirectoryPaths(t *testing.T) {
 	configDir := filepath.Join(base, "config")
 	dataDir := filepath.Join(base, "data")
 	cacheDir := filepath.Join(base, "cache")
-	t.Setenv("VIBEUSAGE_CONFIG_DIR", configDir)
-	t.Setenv("VIBEUSAGE_DATA_DIR", dataDir)
-	t.Setenv("VIBEUSAGE_CACHE_DIR", cacheDir)
+	testenv.SetConfigDir(t.Setenv, configDir)
+	testenv.SetDataDir(t.Setenv, dataDir)
+	testenv.SetCacheDir(t.Setenv, cacheDir)
 
 	tests := []struct {
 		name string
@@ -1111,7 +1112,7 @@ func TestClearAllCache_EmptyDirs_NoError(t *testing.T) {
 
 func TestCredentialsFile_Format(t *testing.T) {
 	dataDir := filepath.Join(t.TempDir(), "data")
-	t.Setenv("VIBEUSAGE_DATA_DIR", dataDir)
+	testenv.SetDataDir(t.Setenv, dataDir)
 	got := CredentialsFile()
 	want := filepath.Join(dataDir, "credentials.json")
 	if got != want {
@@ -1855,7 +1856,7 @@ func TestCacheSnapshot_ErrorWrapping(t *testing.T) {
 	if err := os.WriteFile(blockingFile, []byte("x"), 0o644); err != nil {
 		t.Fatalf("setup blocking file: %v", err)
 	}
-	t.Setenv("VIBEUSAGE_CACHE_DIR", filepath.Join(blockingFile, "impossible"))
+	testenv.SetCacheDir(t.Setenv, filepath.Join(blockingFile, "impossible"))
 	configMu.Lock()
 	globalConfig = nil
 	configMu.Unlock()
@@ -1875,7 +1876,7 @@ func TestCacheOrgID_ErrorWrapping(t *testing.T) {
 	if err := os.WriteFile(blockingFile, []byte("x"), 0o644); err != nil {
 		t.Fatalf("setup blocking file: %v", err)
 	}
-	t.Setenv("VIBEUSAGE_CACHE_DIR", filepath.Join(blockingFile, "impossible"))
+	testenv.SetCacheDir(t.Setenv, filepath.Join(blockingFile, "impossible"))
 	configMu.Lock()
 	globalConfig = nil
 	configMu.Unlock()
@@ -1904,7 +1905,7 @@ func TestWriteCredential_ErrorWrapping_ReadOnly(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = os.Chmod(readonlyDir, 0o755) })
 
-	t.Setenv("VIBEUSAGE_DATA_DIR", readonlyDir)
+	testenv.SetDataDir(t.Setenv, readonlyDir)
 	configMu.Lock()
 	globalConfig = nil
 	configMu.Unlock()

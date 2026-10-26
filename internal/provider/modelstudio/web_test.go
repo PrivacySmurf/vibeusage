@@ -147,7 +147,7 @@ func TestCallSubscriptionSummary(t *testing.T) {
 }
 
 func TestWebConsoleFetchRetriesExpiredManualSessionWithBrowserCookies(t *testing.T) {
-	testenv.ApplyVibeusage(t.Setenv, t.TempDir())
+	testenv.ApplyVibeusage(t, t.TempDir())
 	storeModelStudioTestSession(t, sessionCredentials{
 		Cookie: "login_aliyunid_ticket=stale-ticket; login_current_pk=account",
 		Source: sessionSourceManual,
@@ -202,7 +202,7 @@ func TestWebConsoleFetchRetriesExpiredManualSessionWithBrowserCookies(t *testing
 }
 
 func TestWebConsoleFetchDoesNotOverrideExpiredEnvironmentCookie(t *testing.T) {
-	testenv.ApplyVibeusage(t.Setenv, t.TempDir())
+	testenv.ApplyVibeusage(t, t.TempDir())
 	t.Setenv("MODELSTUDIO_COOKIE", "login_aliyunid_ticket=stale-ticket; login_current_pk=account")
 	server := newModelStudioSessionServer(t, func(string) string { return expiredSessionPayload() })
 
@@ -233,7 +233,7 @@ func TestWebConsoleFetchDoesNotOverrideExpiredEnvironmentCookie(t *testing.T) {
 }
 
 func TestWebConsoleFetchDoesNotRetryWorkspacePermissionError(t *testing.T) {
-	testenv.ApplyVibeusage(t.Setenv, t.TempDir())
+	testenv.ApplyVibeusage(t, t.TempDir())
 	storeModelStudioTestSession(t, sessionCredentials{
 		Cookie: "login_aliyunid_ticket=valid-ticket; login_current_pk=account",
 		Source: sessionSourceManual,
@@ -274,7 +274,7 @@ func TestWebConsoleFetchDoesNotRetryWorkspacePermissionError(t *testing.T) {
 }
 
 func TestWebConsoleFetchThrottlesOnBrowserImportFailure(t *testing.T) {
-	testenv.ApplyVibeusage(t.Setenv, t.TempDir())
+	testenv.ApplyVibeusage(t, t.TempDir())
 	server := newModelStudioSessionServer(t, func(string) string { return successfulSummaryPayload() })
 
 	oldImporter := importModelStudioBrowserSession
@@ -311,7 +311,7 @@ func TestWebConsoleFetchThrottlesOnBrowserImportFailure(t *testing.T) {
 }
 
 func TestWebConsoleFetchThrottlesWhenImportedSessionExpired(t *testing.T) {
-	testenv.ApplyVibeusage(t.Setenv, t.TempDir())
+	testenv.ApplyVibeusage(t, t.TempDir())
 	server := newModelStudioSessionServer(t, func(string) string { return expiredSessionPayload() })
 
 	oldImporter := importModelStudioBrowserSession
@@ -419,7 +419,7 @@ func disableBrowserFallbackForTest(t *testing.T) {
 }
 
 func TestSessionLifetime_RecordsOnExpiryWithInjectedClock(t *testing.T) {
-	testenv.ApplyVibeusage(t.Setenv, t.TempDir())
+	testenv.ApplyVibeusage(t, t.TempDir())
 	disableBrowserFallbackForTest(t)
 
 	born := time.Date(2026, 10, 10, 8, 0, 0, 0, time.UTC)
@@ -493,7 +493,7 @@ func TestSessionLifetime_RecordsOnExpiryWithInjectedClock(t *testing.T) {
 }
 
 func TestSessionLifetime_NoDuplicateEntryForSameGeneration(t *testing.T) {
-	testenv.ApplyVibeusage(t.Setenv, t.TempDir())
+	testenv.ApplyVibeusage(t, t.TempDir())
 	disableBrowserFallbackForTest(t)
 
 	born := time.Date(2026, 10, 12, 9, 0, 0, 0, time.UTC)
@@ -560,7 +560,7 @@ func TestSessionLifetime_NoDuplicateEntryForSameGeneration(t *testing.T) {
 }
 
 func TestSessionLifetime_ExcludesEnvironmentAndUnparsableUpdatedAt(t *testing.T) {
-	testenv.ApplyVibeusage(t.Setenv, t.TempDir())
+	testenv.ApplyVibeusage(t, t.TempDir())
 	disableBrowserFallbackForTest(t)
 
 	born := time.Date(2026, 10, 14, 10, 0, 0, 0, time.UTC)
@@ -629,7 +629,7 @@ func TestSessionLifetime_ExcludesEnvironmentAndUnparsableUpdatedAt(t *testing.T)
 }
 
 func TestSessionLifetime_RetentionCapLast10(t *testing.T) {
-	testenv.ApplyVibeusage(t.Setenv, t.TempDir())
+	testenv.ApplyVibeusage(t, t.TempDir())
 
 	store := defaultSessionLifetimeStore()
 	base := time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)
@@ -668,7 +668,7 @@ func TestSessionLifetime_RetentionCapLast10(t *testing.T) {
 }
 
 func TestSessionLifetime_ZeroRecordedLifetimesShowsAgeNeverWarns(t *testing.T) {
-	testenv.ApplyVibeusage(t.Setenv, t.TempDir())
+	testenv.ApplyVibeusage(t, t.TempDir())
 	disableBrowserFallbackForTest(t)
 
 	born := time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)
@@ -739,7 +739,7 @@ func TestSessionLifetime_ZeroRecordedLifetimesShowsAgeNeverWarns(t *testing.T) {
 }
 
 func TestSessionLifetime_ReloadsInFreshStoreAndEvaluatesThreshold(t *testing.T) {
-	testenv.ApplyVibeusage(t.Setenv, t.TempDir())
+	testenv.ApplyVibeusage(t, t.TempDir())
 	disableBrowserFallbackForTest(t)
 
 	born0 := time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)
@@ -843,7 +843,7 @@ func TestSessionLifetime_ReloadsInFreshStoreAndEvaluatesThreshold(t *testing.T) 
 }
 
 func TestSessionLifetime_RecordPreservesLedgerOnLoadOrWriteFailure(t *testing.T) {
-	testenv.ApplyVibeusage(t.Setenv, t.TempDir())
+	testenv.ApplyVibeusage(t, t.TempDir())
 
 	store := defaultSessionLifetimeStore()
 	born1 := time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)
@@ -912,7 +912,7 @@ func TestSessionLifetime_RecordPreservesLedgerOnLoadOrWriteFailure(t *testing.T)
 }
 
 func TestSessionLifetime_IgnoresMalformedEntriesInMinimumAndDedupe(t *testing.T) {
-	testenv.ApplyVibeusage(t.Setenv, t.TempDir())
+	testenv.ApplyVibeusage(t, t.TempDir())
 
 	store := defaultSessionLifetimeStore()
 	if err := os.MkdirAll(filepath.Dir(store.path), 0o700); err != nil {

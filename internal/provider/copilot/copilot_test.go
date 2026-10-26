@@ -31,7 +31,7 @@ func TestCredentialSources_ListsUsableEnvironmentTokens(t *testing.T) {
 }
 
 func TestDeviceFlowStrategy_LoadsStoredCredentialThenEnvironmentTokensInOrder(t *testing.T) {
-	testenv.ApplyVibeusage(t.Setenv, t.TempDir())
+	testenv.ApplyVibeusage(t, t.TempDir())
 	for _, envVar := range copilotTokenEnvVars {
 		t.Setenv(envVar, "")
 	}
@@ -75,7 +75,7 @@ func TestDeviceFlowStrategy_LoadsStoredCredentialThenEnvironmentTokensInOrder(t 
 }
 
 func TestFetch_UsesEnvironmentTokenAndLabelsSnapshot(t *testing.T) {
-	testenv.ApplyVibeusage(t.Setenv, t.TempDir())
+	testenv.ApplyVibeusage(t, t.TempDir())
 	for _, envVar := range copilotTokenEnvVars {
 		t.Setenv(envVar, "")
 	}
@@ -351,7 +351,7 @@ func TestParseTypedUsageResponse_InvalidResetDate(t *testing.T) {
 }
 
 func TestSaveCopilotCredentials_PersistsToSlot(t *testing.T) {
-	testenv.ApplyVibeusage(t.Setenv, t.TempDir())
+	testenv.ApplyVibeusage(t, t.TempDir())
 
 	in := &oauth.Credentials{
 		AccessToken:  "new-access",

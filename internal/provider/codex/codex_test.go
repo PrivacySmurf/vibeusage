@@ -348,17 +348,10 @@ func prependFakeCodex(t *testing.T, script string) {
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 }
 
-func setUserHome(t *testing.T, home string) {
-	t.Helper()
-	t.Setenv("HOME", home)
-	t.Setenv("USERPROFILE", home)
-}
-
 func TestLoadCredentials_DeletesOrphanSlotWhenCanonicalFilePresent(t *testing.T) {
-	home := t.TempDir()
-	setUserHome(t, home)
 	t.Setenv("CODEX_HOME", "")
-	testenv.ApplyVibeusage(t.Setenv, t.TempDir())
+	dirs := testenv.ApplyVibeusage(t, t.TempDir())
+	home := dirs.Home
 	stubCodexKeychainEmpty(t)
 
 	writeCodexCLICreds(t, home)
@@ -380,9 +373,8 @@ func TestLoadCredentials_DeletesOrphanSlotWhenCanonicalFilePresent(t *testing.T)
 }
 
 func TestLoadCredentials_NoCanonicalSource_PreservesOrphan(t *testing.T) {
-	setUserHome(t, t.TempDir())
 	t.Setenv("CODEX_HOME", "")
-	testenv.ApplyVibeusage(t.Setenv, t.TempDir())
+	testenv.ApplyVibeusage(t, t.TempDir())
 	stubCodexKeychainEmpty(t)
 
 	if err := config.WriteCredential("codex", "oauth", []byte(`{"access_token":"stale"}`)); err != nil {
@@ -399,10 +391,9 @@ func TestLoadCredentials_NoCanonicalSource_PreservesOrphan(t *testing.T) {
 }
 
 func TestFetch_UsesNoExpiryTokenBeforeRefreshing(t *testing.T) {
-	home := t.TempDir()
-	setUserHome(t, home)
 	t.Setenv("CODEX_HOME", "")
-	testenv.ApplyVibeusage(t.Setenv, t.TempDir())
+	dirs := testenv.ApplyVibeusage(t, t.TempDir())
+	home := dirs.Home
 	stubCodexKeychainEmpty(t)
 	writeCodexAuth(t, home, `{"tokens":{"access_token":"still-valid","refresh_token":"ref","account_id":"account-123"}}`)
 	t.Setenv("PATH", t.TempDir())
@@ -436,10 +427,9 @@ func TestFetch_UsesNoExpiryTokenBeforeRefreshing(t *testing.T) {
 }
 
 func TestFetch_IncludesResetActivityWhenNoCreditsAreAvailable(t *testing.T) {
-	home := t.TempDir()
-	setUserHome(t, home)
 	t.Setenv("CODEX_HOME", "")
-	testenv.ApplyVibeusage(t.Setenv, t.TempDir())
+	dirs := testenv.ApplyVibeusage(t, t.TempDir())
+	home := dirs.Home
 	stubCodexKeychainEmpty(t)
 	writeCodexAuth(t, home, `{"tokens":{"access_token":"tok"}}`)
 
@@ -483,10 +473,9 @@ func TestFetch_IncludesResetActivityWhenNoCreditsAreAvailable(t *testing.T) {
 }
 
 func TestFetch_IncludesAvailableResetCreditDetails(t *testing.T) {
-	home := t.TempDir()
-	setUserHome(t, home)
 	t.Setenv("CODEX_HOME", "")
-	testenv.ApplyVibeusage(t.Setenv, t.TempDir())
+	dirs := testenv.ApplyVibeusage(t, t.TempDir())
+	home := dirs.Home
 	stubCodexKeychainEmpty(t)
 	writeCodexAuth(t, home, `{"tokens":{"access_token":"tok","refresh_token":"ref"}}`)
 
@@ -606,10 +595,9 @@ func TestUsageLimitResetsFromDetails_PreservesSummaryAndSortsExpirations(t *test
 }
 
 func TestFetch_ResetCreditDetailFailureKeepsSummaryCount(t *testing.T) {
-	home := t.TempDir()
-	setUserHome(t, home)
 	t.Setenv("CODEX_HOME", "")
-	testenv.ApplyVibeusage(t.Setenv, t.TempDir())
+	dirs := testenv.ApplyVibeusage(t, t.TempDir())
+	home := dirs.Home
 	stubCodexKeychainEmpty(t)
 	writeCodexAuth(t, home, `{"tokens":{"access_token":"tok"}}`)
 
@@ -645,10 +633,9 @@ func TestFetch_ResetCreditDetailFailureKeepsSummaryCount(t *testing.T) {
 }
 
 func TestFetch_UsesExpiredMetadataTokenBeforeRefreshing(t *testing.T) {
-	home := t.TempDir()
-	setUserHome(t, home)
 	t.Setenv("CODEX_HOME", "")
-	testenv.ApplyVibeusage(t.Setenv, t.TempDir())
+	dirs := testenv.ApplyVibeusage(t, t.TempDir())
+	home := dirs.Home
 	stubCodexKeychainEmpty(t)
 	writeCodexAuth(t, home, `{"tokens":{"access_token":"still-valid","refresh_token":"ref","expires_at":"2020-01-01T00:00:00Z"}}`)
 	t.Setenv("PATH", t.TempDir())
@@ -674,10 +661,9 @@ func TestFetch_UsesExpiredMetadataTokenBeforeRefreshing(t *testing.T) {
 }
 
 func TestFetch_RefreshesNoExpiryTokenAfterUnauthorized(t *testing.T) {
-	home := t.TempDir()
-	setUserHome(t, home)
 	t.Setenv("CODEX_HOME", "")
-	testenv.ApplyVibeusage(t.Setenv, t.TempDir())
+	dirs := testenv.ApplyVibeusage(t, t.TempDir())
+	home := dirs.Home
 	stubCodexKeychainEmpty(t)
 	writeCodexAuth(t, home, `{"tokens":{"access_token":"stale","refresh_token":"ref"}}`)
 	prependFakeCodex(t, "#!/usr/bin/env sh\ncat > \"$HOME/.codex/auth.json\" <<'JSON'\n{\"tokens\":{\"access_token\":\"fresh\",\"refresh_token\":\"ref\"}}\nJSON\n")
@@ -725,9 +711,8 @@ func TestAuth_ReturnsParentCancellation(t *testing.T) {
 }
 
 func TestAuth_ReturnsCancellationDuringCredentialCheck(t *testing.T) {
-	setUserHome(t, t.TempDir())
 	t.Setenv("CODEX_HOME", "")
-	testenv.ApplyVibeusage(t.Setenv, t.TempDir())
+	testenv.ApplyVibeusage(t, t.TempDir())
 
 	old := readKeychainSecret
 	t.Cleanup(func() { readKeychainSecret = old })
@@ -756,9 +741,8 @@ func TestAuth_ReturnsCancellationDuringCredentialCheck(t *testing.T) {
 }
 
 func TestAuth_FailsWhenNoCanonicalSource(t *testing.T) {
-	setUserHome(t, t.TempDir())
 	t.Setenv("CODEX_HOME", "")
-	testenv.ApplyVibeusage(t.Setenv, t.TempDir())
+	testenv.ApplyVibeusage(t, t.TempDir())
 	stubCodexKeychainEmpty(t)
 
 	flow, ok := Codex{}.Auth().(provider.CustomAuthFlow)
@@ -780,10 +764,9 @@ func TestAuth_FailsWhenNoCanonicalSource(t *testing.T) {
 }
 
 func TestAuth_SucceedsWhenCanonicalSourcePresent(t *testing.T) {
-	home := t.TempDir()
-	setUserHome(t, home)
 	t.Setenv("CODEX_HOME", "")
-	testenv.ApplyVibeusage(t.Setenv, t.TempDir())
+	dirs := testenv.ApplyVibeusage(t, t.TempDir())
+	home := dirs.Home
 	stubCodexKeychainEmpty(t)
 	writeCodexCLICreds(t, home)
 
@@ -794,5 +777,24 @@ func TestAuth_SucceedsWhenCanonicalSourcePresent(t *testing.T) {
 	}
 	if !success {
 		t.Error("RunFlow() success = false, want true (creds present)")
+	}
+}
+
+func TestLoadCredentials_IgnoresInheritedCodexHome(t *testing.T) {
+	outsideCodexHome := filepath.Join(t.TempDir(), "outside-codex-home")
+	if err := os.MkdirAll(outsideCodexHome, 0o700); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	const outsideJSON = `{"tokens":{"access_token":"outside-codex-tok","refresh_token":"outside-ref"}}`
+	if err := os.WriteFile(filepath.Join(outsideCodexHome, "auth.json"), []byte(outsideJSON), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	t.Setenv("CODEX_HOME", outsideCodexHome)
+
+	testenv.ApplyVibeusage(t, t.TempDir())
+	stubCodexKeychainEmpty(t)
+
+	if creds := (&OAuthStrategy{}).loadCredentials(); creds != nil {
+		t.Fatalf("loadCredentials() = %+v, want nil when inherited CODEX_HOME is cleared by ApplyVibeusage", creds)
 	}
 }

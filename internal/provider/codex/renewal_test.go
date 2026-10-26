@@ -24,12 +24,10 @@ func codexTestJWT(subject string, exp int64) string {
 
 func setupCodexRenewalEnv(t *testing.T) string {
 	t.Helper()
-	home := t.TempDir()
-	setUserHome(t, home)
 	t.Setenv("CODEX_HOME", "")
-	testenv.ApplyVibeusage(t.Setenv, t.TempDir())
+	dirs := testenv.ApplyVibeusage(t, t.TempDir())
 	stubCodexKeychainEmpty(t)
-	return home
+	return dirs.Home
 }
 
 func readCodexRefreshState(t *testing.T, home string) (map[string]any, string) {

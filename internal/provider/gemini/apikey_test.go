@@ -5,9 +5,14 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+
+	"github.com/joshuadavidthomas/vibeusage/internal/testenv"
 )
 
 func TestAPIKeyStrategyFetch_SendsAPIKeyInHeader(t *testing.T) {
+	dirs := testenv.ApplyVibeusage(t, t.TempDir())
+	t.Cleanup(func() { _ = dirs.Close() })
+
 	const apiKey = "test-api-key"
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

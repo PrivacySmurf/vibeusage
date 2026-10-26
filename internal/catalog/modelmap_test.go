@@ -8,6 +8,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/joshuadavidthomas/vibeusage/internal/testenv"
 )
 
 // testData returns a minimal models.dev-shaped fixture for testing.
@@ -695,7 +697,7 @@ func TestFetchHelpersHonorCanceledContext(t *testing.T) {
 
 func TestCacheIsFresh_NoFiles(t *testing.T) {
 	dir := t.TempDir()
-	t.Setenv("VIBEUSAGE_CACHE_DIR", dir)
+	testenv.SetCacheDir(t.Setenv, dir)
 
 	if CacheIsFresh() {
 		t.Error("CacheIsFresh() = true with no cache files, want false")
@@ -704,7 +706,7 @@ func TestCacheIsFresh_NoFiles(t *testing.T) {
 
 func TestCacheIsFresh_FreshFiles(t *testing.T) {
 	dir := t.TempDir()
-	t.Setenv("VIBEUSAGE_CACHE_DIR", dir)
+	testenv.SetCacheDir(t.Setenv, dir)
 
 	_ = os.WriteFile(filepath.Join(dir, "models.json"), []byte("{}"), 0o644)
 	_ = os.WriteFile(filepath.Join(dir, "multipliers.json"), []byte("{}"), 0o644)
@@ -716,7 +718,7 @@ func TestCacheIsFresh_FreshFiles(t *testing.T) {
 
 func TestCacheIsFresh_StaleModelsFile(t *testing.T) {
 	dir := t.TempDir()
-	t.Setenv("VIBEUSAGE_CACHE_DIR", dir)
+	testenv.SetCacheDir(t.Setenv, dir)
 
 	modelsPath := filepath.Join(dir, "models.json")
 	multipliersPath := filepath.Join(dir, "multipliers.json")
@@ -733,7 +735,7 @@ func TestCacheIsFresh_StaleModelsFile(t *testing.T) {
 
 func TestCacheIsFresh_StaleMultipliersFile(t *testing.T) {
 	dir := t.TempDir()
-	t.Setenv("VIBEUSAGE_CACHE_DIR", dir)
+	testenv.SetCacheDir(t.Setenv, dir)
 
 	modelsPath := filepath.Join(dir, "models.json")
 	multipliersPath := filepath.Join(dir, "multipliers.json")

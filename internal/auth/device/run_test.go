@@ -12,6 +12,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/joshuadavidthomas/vibeusage/internal/testenv"
 )
 
 func TestPollContext_ParentCancellation(t *testing.T) {
@@ -260,7 +262,7 @@ func TestSaveCredentials_WriteFailure(t *testing.T) {
 	if err := os.WriteFile(dataPath, []byte("not a directory"), 0o600); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
-	t.Setenv("VIBEUSAGE_DATA_DIR", dataPath)
+	testenv.SetDataDir(t.Setenv, dataPath)
 
 	err := saveCredentials(Config{ProviderID: "test-provider", CredType: "oauth"}, tokenResponse{AccessToken: "token"})
 	if err == nil {

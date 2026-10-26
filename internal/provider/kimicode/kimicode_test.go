@@ -16,6 +16,8 @@ import (
 )
 
 func TestAPIKeyStrategy_IsAvailable_EnvVar(t *testing.T) {
+	dirs := testenv.ApplyVibeusage(t, t.TempDir())
+	t.Cleanup(func() { _ = dirs.Close() })
 	t.Setenv("KIMI_CODE_API_KEY", "test-key")
 	s := &APIKeyStrategy{}
 	if !s.IsAvailable() {
@@ -24,18 +26,25 @@ func TestAPIKeyStrategy_IsAvailable_EnvVar(t *testing.T) {
 }
 
 func TestAPIKeyStrategy_IsAvailable_NoEnvVar(t *testing.T) {
+	dirs := testenv.ApplyVibeusage(t, t.TempDir())
+	t.Cleanup(func() { _ = dirs.Close() })
 	t.Setenv("KIMI_CODE_API_KEY", "")
 	s := &APIKeyStrategy{}
-	if s.loadAPIKey() == "" && s.IsAvailable() {
+	if got := s.loadAPIKey(); got != "" {
+		t.Fatalf("loadAPIKey() = %q, want empty in isolated fixture", got)
+	}
+	if s.IsAvailable() {
 		t.Error("IsAvailable() = true, want false when no API key available")
 	}
 }
 
 func TestAPIKeyStrategy_Fetch_NoKey(t *testing.T) {
+	dirs := testenv.ApplyVibeusage(t, t.TempDir())
+	t.Cleanup(func() { _ = dirs.Close() })
 	t.Setenv("KIMI_CODE_API_KEY", "")
 	s := &APIKeyStrategy{}
-	if s.loadAPIKey() != "" {
-		t.Skip("credential file present — skipping no-key test")
+	if got := s.loadAPIKey(); got != "" {
+		t.Fatalf("loadAPIKey() = %q, want empty in isolated fixture", got)
 	}
 
 	result, err := s.Fetch(context.Background())
@@ -48,13 +57,15 @@ func TestAPIKeyStrategy_Fetch_NoKey(t *testing.T) {
 }
 
 func TestDeviceFlowStrategy_Fetch_NoCredentials(t *testing.T) {
+	dirs := testenv.ApplyVibeusage(t, t.TempDir())
+	t.Cleanup(func() { _ = dirs.Close() })
 	s := &DeviceFlowStrategy{}
 	creds, err := s.loadCredentials()
 	if err != nil {
 		t.Fatalf("loadCredentials: %v", err)
 	}
 	if creds != nil {
-		t.Skip("credential file present — skipping no-cred test")
+		t.Fatalf("loadCredentials() = %+v, want nil in isolated fixture", creds)
 	}
 
 	result, err := s.Fetch(context.Background())
@@ -66,11 +77,45 @@ func TestDeviceFlowStrategy_Fetch_NoCredentials(t *testing.T) {
 	}
 }
 
+func TestDeviceFlowStrategy_LoadCredentials_DoesNotTouchPreIsolationStore(t *testing.T) {
+	ambientDir := t.TempDir()
+	testenv.SetConfigDir(t.Setenv, ambientDir)
+	testenv.SetDataDir(t.Setenv, ambientDir)
+	legacy := []byte(`{"access_token":"ambient-tok","refresh_token":"rt","expires_at":1740000000}`)
+	if err := config.WriteCredential("kimicode", "oauth", legacy); err != nil {
+		t.Fatalf("WriteCredential: %v", err)
+	}
+	ambientPath := config.CredentialsFile()
+	before, err := os.ReadFile(ambientPath)
+	if err != nil {
+		t.Fatalf("ReadFile(ambientPath): %v", err)
+	}
+
+	dirs := testenv.ApplyVibeusage(t, t.TempDir())
+	t.Cleanup(func() { _ = dirs.Close() })
+
+	s := &DeviceFlowStrategy{}
+	creds, err := s.loadCredentials()
+	if err != nil {
+		t.Fatalf("loadCredentials: %v", err)
+	}
+	if creds != nil {
+		t.Fatalf("loadCredentials() = %+v, want nil in isolated fixture", creds)
+	}
+	after, err := os.ReadFile(ambientPath)
+	if err != nil {
+		t.Fatalf("ReadFile(ambientPath) after loadCredentials: %v", err)
+	}
+	if string(after) != string(before) {
+		t.Fatalf("ambient credentials store was modified:\n got: %s\nwant: %s", after, before)
+	}
+}
+
 func TestDeviceFlowStrategy_LoadCredentials_MigrationWriteFailure(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("requires a chmod-induced Unix credential migration write failure")
 	}
-	testenv.ApplyVibeusage(t.Setenv, t.TempDir())
+	testenv.ApplyVibeusage(t, t.TempDir())
 	legacy := []byte(`{"access_token":"tok","refresh_token":"rt","expires_at":1740000000}`)
 	if err := config.WriteCredential("kimicode", "oauth", legacy); err != nil {
 		t.Fatalf("WriteCredential: %v", err)
@@ -222,7 +267,7 @@ func TestKimiCode_Meta(t *testing.T) {
 }
 
 func TestSaveKimicodeCredentials_PersistsToSlot(t *testing.T) {
-	testenv.ApplyVibeusage(t.Setenv, t.TempDir())
+	testenv.ApplyVibeusage(t, t.TempDir())
 
 	in := &oauth.Credentials{
 		AccessToken:  "new-access",

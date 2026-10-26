@@ -22,7 +22,7 @@ const openCodeUsageBody = `rollingUsage:{status:"ok",resetInSec:3600,usagePercen
 
 func isolateOpenCodeTest(t *testing.T) {
 	t.Helper()
-	testenv.ApplyVibeusage(t.Setenv, t.TempDir())
+	testenv.ApplyVibeusage(t, t.TempDir())
 	t.Setenv("OPENCODE_WORKSPACE_ID", "")
 }
 

@@ -25,7 +25,7 @@ func TestConfigReset_UsesConfirm(t *testing.T) {
 	defer prompt.SetDefault(old)
 
 	tmpDir := t.TempDir()
-	testenv.ApplySameDir(t.Setenv, tmpDir)
+	testenv.ApplySameDir(t, tmpDir)
 
 	// Create a config file to reset
 	cfgDir := tmpDir
@@ -60,7 +60,7 @@ func TestConfigReset_UserDeclinesConfirm(t *testing.T) {
 	defer prompt.SetDefault(old)
 
 	tmpDir := t.TempDir()
-	testenv.ApplySameDir(t.Setenv, tmpDir)
+	testenv.ApplySameDir(t, tmpDir)
 
 	// Create a config file
 	_ = os.WriteFile(filepath.Join(tmpDir, "config.toml"), []byte("[display]\n"), 0o644)
@@ -92,7 +92,7 @@ func TestConfigReset_UserDeclinesConfirm(t *testing.T) {
 
 func TestConfigResetJSON_UsesTypedStruct(t *testing.T) {
 	tmp := t.TempDir()
-	testenv.ApplySameDir(t.Setenv, tmp)
+	testenv.ApplySameDir(t, tmp)
 	config.Override(t, config.DefaultConfig())
 
 	var buf bytes.Buffer

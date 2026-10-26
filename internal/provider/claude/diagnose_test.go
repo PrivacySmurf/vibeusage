@@ -14,9 +14,8 @@ import (
 )
 
 func TestDiagnoseAuthReadOnlyAndTokenSafe(t *testing.T) {
-	home := t.TempDir()
-	setUserHome(t, home)
-	testenv.ApplyVibeusage(t.Setenv, t.TempDir())
+	dirs := testenv.ApplyVibeusage(t, t.TempDir())
+	home := dirs.Home
 	t.Setenv("CLAUDE_CONFIG_DIR", "")
 	writeClaudeAuth(t, home, `{"claudeAiOauth":{"accessToken":"FILE_SECRET_SENTINEL","refreshToken":"REFRESH_SECRET_SENTINEL","expiresAt":1}}`)
 	if err := config.WriteCredential("claude", "oauth", []byte(`{"access_token":"ORPHAN_SECRET_SENTINEL"}`)); err != nil {
@@ -68,9 +67,8 @@ func TestDescribeClaudeCredentialsDoesNotPrintInvalidExpiry(t *testing.T) {
 }
 
 func TestCustomClaudeConfigExcludesDefaultKeychain(t *testing.T) {
-	home := t.TempDir()
-	setUserHome(t, home)
-	testenv.ApplyVibeusage(t.Setenv, t.TempDir())
+	dirs := testenv.ApplyVibeusage(t, t.TempDir())
+	home := dirs.Home
 	custom := filepath.Join(home, "custom-claude")
 	t.Setenv("CLAUDE_CONFIG_DIR", custom)
 	if err := os.MkdirAll(custom, 0o700); err != nil {
@@ -95,7 +93,7 @@ func TestCustomClaudeConfigExcludesDefaultKeychain(t *testing.T) {
 }
 
 func TestAuthOverridePreventsWrongChainRenewal(t *testing.T) {
-	setUserHome(t, t.TempDir())
+	testenv.ApplyVibeusage(t, t.TempDir())
 	t.Setenv("ANTHROPIC_AUTH_TOKEN", "OVERRIDE_SECRET_SENTINEL")
 	creds, outcome := (&OAuthStrategy{}).refreshViaCLI(context.Background())
 	if creds != nil || outcome.Reason != oauth.CLIRefreshAuthOverride {
@@ -120,8 +118,7 @@ func TestClaudeRefreshFailureSeparatesReauthFromTransientFailure(t *testing.T) {
 }
 
 func TestProbeHealthUsesControlledFetchNotGeneration(t *testing.T) {
-	setUserHome(t, t.TempDir())
-	testenv.ApplyVibeusage(t.Setenv, t.TempDir())
+	testenv.ApplyVibeusage(t, t.TempDir())
 	stubKeychainEmpty(t)
 	if (&OAuthStrategy{}).ProbeHealth(context.Background()) {
 		t.Fatal("without an OAuth chain, probe must not launch a Claude generation")

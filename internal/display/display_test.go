@@ -1573,7 +1573,7 @@ func writeModelStudioDisplayTestLifetime40h(t *testing.T) {
 }
 
 func TestRenderProviderPanel_ModelStudioSessionAgeWithoutWarning(t *testing.T) {
-	testenv.ApplyVibeusage(t.Setenv, t.TempDir())
+	testenv.ApplyVibeusage(t, t.TempDir())
 	born := time.Date(2026, 10, 20, 10, 0, 0, 0, time.UTC)
 	now := born.Add(12*time.Hour + 30*time.Minute)
 	writeModelStudioDisplayTestCredential(t, born, "browser")
@@ -1606,7 +1606,7 @@ func TestRenderProviderPanel_ModelStudioSessionAgeWithoutWarning(t *testing.T) {
 }
 
 func TestRenderProviderPanel_ModelStudioSessionAgeWithWarning(t *testing.T) {
-	testenv.ApplyVibeusage(t.Setenv, t.TempDir())
+	testenv.ApplyVibeusage(t, t.TempDir())
 	born := time.Date(2026, 10, 20, 10, 0, 0, 0, time.UTC)
 	now := born.Add(30 * time.Hour)
 	writeModelStudioDisplayTestCredential(t, born, "browser")
@@ -1639,7 +1639,7 @@ func TestRenderProviderPanel_ModelStudioSessionAgeWithWarning(t *testing.T) {
 }
 
 func TestRenderProviderPanel_RefreshesCachedModelStudioSession(t *testing.T) {
-	testenv.ApplyVibeusage(t.Setenv, t.TempDir())
+	testenv.ApplyVibeusage(t, t.TempDir())
 
 	born := time.Date(2026, 10, 20, 0, 0, 0, 0, time.UTC)
 	writeModelStudioDisplayTestCredential(t, born, "browser")

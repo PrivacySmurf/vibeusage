@@ -4,10 +4,12 @@ import (
 	"errors"
 	"os"
 	"testing"
+
+	"github.com/joshuadavidthomas/vibeusage/internal/testenv"
 )
 
 func TestClearModelsCacheRemovesAllCatalogFiles(t *testing.T) {
-	t.Setenv("VIBEUSAGE_CACHE_DIR", t.TempDir())
+	testenv.SetCacheDir(t.Setenv, t.TempDir())
 
 	for _, path := range []string{ModelsFile(), MultipliersFile()} {
 		if err := os.WriteFile(path, []byte("{}"), 0o644); err != nil {

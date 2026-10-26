@@ -617,7 +617,7 @@ func TestLoadCachedIdentity(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			testenv.ApplyVibeusage(t.Setenv, t.TempDir())
+			testenv.ApplyVibeusage(t, t.TempDir())
 			tt.setup(t)
 
 			got, err := loadCachedIdentity()
@@ -635,7 +635,7 @@ func TestLoadCachedIdentity(t *testing.T) {
 }
 
 func TestFetchWithCredentials_CorruptIdentityCacheWarnsAndFetchesLive(t *testing.T) {
-	testenv.ApplyVibeusage(t.Setenv, t.TempDir())
+	testenv.ApplyVibeusage(t, t.TempDir())
 	path := config.SnapshotPath("claude")
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		t.Fatalf("MkdirAll: %v", err)
@@ -738,12 +738,6 @@ func prependFakeClaude(t *testing.T, script string) {
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 }
 
-func setUserHome(t *testing.T, home string) {
-	t.Helper()
-	t.Setenv("HOME", home)
-	t.Setenv("USERPROFILE", home)
-}
-
 func setClaudeOAuthEndpoints(t *testing.T, usageURL, accountURL string) {
 	t.Helper()
 	oldUsage := oauthUsageEndpoint
@@ -769,9 +763,8 @@ func cacheClaudeIdentity(t *testing.T) {
 }
 
 func TestFetch_UsesExpiredMetadataTokenBeforeRefreshing(t *testing.T) {
-	home := t.TempDir()
-	setUserHome(t, home)
-	testenv.ApplyVibeusage(t.Setenv, t.TempDir())
+	dirs := testenv.ApplyVibeusage(t, t.TempDir())
+	home := dirs.Home
 	stubKeychainEmpty(t)
 	cacheClaudeIdentity(t)
 	writeClaudeAuth(t, home, `{"claudeAiOauth":{"accessToken":"still-valid","refreshToken":"ref","expiresAt":1}}`)
@@ -798,9 +791,8 @@ func TestFetch_UsesExpiredMetadataTokenBeforeRefreshing(t *testing.T) {
 }
 
 func TestFetch_RefreshesAfterUnauthorized(t *testing.T) {
-	home := t.TempDir()
-	setUserHome(t, home)
-	testenv.ApplyVibeusage(t.Setenv, t.TempDir())
+	dirs := testenv.ApplyVibeusage(t, t.TempDir())
+	home := dirs.Home
 	stubKeychainEmpty(t)
 	cacheClaudeIdentity(t)
 	writeClaudeAuth(t, home, `{"claudeAiOauth":{"accessToken":"stale","refreshToken":"ref","expiresAt":1}}`)
@@ -835,9 +827,8 @@ func TestFetch_RefreshesAfterUnauthorized(t *testing.T) {
 }
 
 func TestFetch_RefreshesAfter429WhenTokenNeedsRefresh(t *testing.T) {
-	home := t.TempDir()
-	setUserHome(t, home)
-	testenv.ApplyVibeusage(t.Setenv, t.TempDir())
+	dirs := testenv.ApplyVibeusage(t, t.TempDir())
+	home := dirs.Home
 	stubKeychainEmpty(t)
 	cacheClaudeIdentity(t)
 	writeClaudeAuth(t, home, `{"claudeAiOauth":{"accessToken":"stale","refreshToken":"ref","expiresAt":1}}`)
@@ -873,9 +864,8 @@ func TestFetch_RefreshesAfter429WhenTokenNeedsRefresh(t *testing.T) {
 }
 
 func TestFetch_ExpiredToken429UnknownCLIFailureBacksOffWithoutClaimingReauth(t *testing.T) {
-	home := t.TempDir()
-	setUserHome(t, home)
-	testenv.ApplyVibeusage(t.Setenv, t.TempDir())
+	dirs := testenv.ApplyVibeusage(t, t.TempDir())
+	home := dirs.Home
 	stubKeychainEmpty(t)
 	cacheClaudeIdentity(t)
 	writeClaudeAuth(t, home, `{"claudeAiOauth":{"accessToken":"expired-tok","refreshToken":"ref","expiresAt":1}}`)
@@ -905,9 +895,8 @@ func TestFetch_ExpiredToken429UnknownCLIFailureBacksOffWithoutClaimingReauth(t *
 }
 
 func TestFetch_FreshToken429ReturnsThrottledWithoutCLIRefresh(t *testing.T) {
-	home := t.TempDir()
-	setUserHome(t, home)
-	testenv.ApplyVibeusage(t.Setenv, t.TempDir())
+	dirs := testenv.ApplyVibeusage(t, t.TempDir())
+	home := dirs.Home
 	stubKeychainEmpty(t)
 	cacheClaudeIdentity(t)
 	// Fresh token expiring far in the future
@@ -943,9 +932,8 @@ func TestFetch_FreshToken429ReturnsThrottledWithoutCLIRefresh(t *testing.T) {
 }
 
 func TestLoadCredentials_DeletesOrphanSlotWhenCanonicalFilePresent(t *testing.T) {
-	home := t.TempDir()
-	setUserHome(t, home)
-	testenv.ApplyVibeusage(t.Setenv, t.TempDir())
+	dirs := testenv.ApplyVibeusage(t, t.TempDir())
+	home := dirs.Home
 	stubKeychainEmpty(t)
 
 	writeClaudeCLICreds(t, home)
@@ -967,8 +955,7 @@ func TestLoadCredentials_DeletesOrphanSlotWhenCanonicalFilePresent(t *testing.T)
 }
 
 func TestLoadCredentials_DeletesOrphanSlotWhenKeychainPresent(t *testing.T) {
-	setUserHome(t, t.TempDir())
-	testenv.ApplyVibeusage(t.Setenv, t.TempDir())
+	testenv.ApplyVibeusage(t, t.TempDir())
 
 	old := readKeychainSecret
 	t.Cleanup(func() { readKeychainSecret = old })
@@ -994,8 +981,7 @@ func TestLoadCredentials_DeletesOrphanSlotWhenKeychainPresent(t *testing.T) {
 }
 
 func TestLoadCredentials_NoCanonicalSource_PreservesOrphan(t *testing.T) {
-	setUserHome(t, t.TempDir())
-	testenv.ApplyVibeusage(t.Setenv, t.TempDir())
+	testenv.ApplyVibeusage(t, t.TempDir())
 	stubKeychainEmpty(t)
 
 	if err := config.WriteCredential("claude", "oauth", []byte(`{"access_token":"stale"}`)); err != nil {
@@ -1012,9 +998,8 @@ func TestLoadCredentials_NoCanonicalSource_PreservesOrphan(t *testing.T) {
 }
 
 func TestLoadCredentials_PrefersValidKeychainOverExpiredFile(t *testing.T) {
-	home := t.TempDir()
-	setUserHome(t, home)
-	testenv.ApplyVibeusage(t.Setenv, t.TempDir())
+	dirs := testenv.ApplyVibeusage(t, t.TempDir())
+	home := dirs.Home
 
 	// Write expired credentials to file (~/.claude/.credentials.json)
 	writeClaudeAuth(t, home, `{"claudeAiOauth":{"accessToken":"file-expired","refreshToken":"ref","expiresAt":1}}`)
@@ -1054,9 +1039,8 @@ func TestParseClaudeCredentials_RejectsTokenlessRecords(t *testing.T) {
 }
 
 func TestLoadCredentials_EmptyKeychainDoesNotShadowExpiredFile(t *testing.T) {
-	home := t.TempDir()
-	setUserHome(t, home)
-	testenv.ApplyVibeusage(t.Setenv, t.TempDir())
+	dirs := testenv.ApplyVibeusage(t, t.TempDir())
+	home := dirs.Home
 	writeClaudeAuth(t, home, `{"claudeAiOauth":{"accessToken":"file-token","refreshToken":"file-refresh","expiresAt":1}}`)
 
 	oldRead := readKeychainSecret
@@ -1101,9 +1085,8 @@ func TestLoadKeychainCredentials_EmptyCurrentUserFallsBackToLegacy(t *testing.T)
 }
 
 func TestLoadCredentials_PrefersScopedKeychainOverLaterFileExpiry(t *testing.T) {
-	home := t.TempDir()
-	setUserHome(t, home)
-	testenv.ApplyVibeusage(t.Setenv, t.TempDir())
+	dirs := testenv.ApplyVibeusage(t, t.TempDir())
+	home := dirs.Home
 
 	// Write credentials expiring at timestamp 2000000000000 (~2033)
 	writeClaudeAuth(t, home, `{"claudeAiOauth":{"accessToken":"file-newer","refreshToken":"ref","expiresAt":2000000000000}}`)
@@ -1122,5 +1105,24 @@ func TestLoadCredentials_PrefersScopedKeychainOverLaterFileExpiry(t *testing.T) 
 	}
 	if creds.AccessToken != "kc-older" {
 		t.Errorf("access_token = %q, want current-user Keychain's kc-older", creds.AccessToken)
+	}
+}
+
+func TestLoadCredentials_IgnoresInheritedClaudeConfigDir(t *testing.T) {
+	outsideProfile := filepath.Join(t.TempDir(), "outside-claude-profile")
+	if err := os.MkdirAll(outsideProfile, 0o700); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	const outsideJSON = `{"claudeAiOauth":{"accessToken":"outside-cli-tok","refreshToken":"outside-ref","expiresAt":4102444800000}}`
+	if err := os.WriteFile(filepath.Join(outsideProfile, ".credentials.json"), []byte(outsideJSON), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	t.Setenv("CLAUDE_CONFIG_DIR", outsideProfile)
+
+	testenv.ApplyVibeusage(t, t.TempDir())
+	stubKeychainEmpty(t)
+
+	if creds := (&OAuthStrategy{}).loadCredentials(); creds != nil {
+		t.Fatalf("loadCredentials() = %+v, want nil when inherited CLAUDE_CONFIG_DIR is cleared by ApplyVibeusage", creds)
 	}
 }

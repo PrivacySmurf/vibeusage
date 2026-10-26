@@ -164,7 +164,7 @@ func TestDisplayName_Empty(t *testing.T) {
 }
 
 func TestAvailableIDs_FiltersEnabledAndAvailable(t *testing.T) {
-	testenv.ApplySameDir(t.Setenv, t.TempDir())
+	testenv.ApplySameDir(t, t.TempDir())
 	orig := registry
 	registry = map[string]Provider{}
 	defer func() { registry = orig }()
@@ -196,7 +196,7 @@ func TestAvailableIDs_FiltersEnabledAndAvailable(t *testing.T) {
 func boolPtr(v bool) *bool { return &v }
 
 func TestAvailableIDs_RespectsConfigDisabledProvider(t *testing.T) {
-	testenv.ApplySameDir(t.Setenv, t.TempDir())
+	testenv.ApplySameDir(t, t.TempDir())
 
 	orig := registry
 	registry = map[string]Provider{}
@@ -224,7 +224,7 @@ func TestAvailableIDs_RespectsConfigDisabledProvider(t *testing.T) {
 }
 
 func TestAvailableIDs_RespectsProviderDisabled(t *testing.T) {
-	testenv.ApplySameDir(t.Setenv, t.TempDir())
+	testenv.ApplySameDir(t, t.TempDir())
 	orig := registry
 	registry = map[string]Provider{}
 	defer func() { registry = orig }()
@@ -251,7 +251,7 @@ func TestAvailableIDs_RespectsProviderDisabled(t *testing.T) {
 }
 
 func TestAvailableIDs_EmptyWhenNoneAvailable(t *testing.T) {
-	testenv.ApplySameDir(t.Setenv, t.TempDir())
+	testenv.ApplySameDir(t, t.TempDir())
 	orig := registry
 	registry = map[string]Provider{}
 	defer func() { registry = orig }()
@@ -270,7 +270,7 @@ func TestAvailableIDs_EmptyWhenNoneAvailable(t *testing.T) {
 }
 
 func TestAvailableIDs_IsSorted(t *testing.T) {
-	testenv.ApplySameDir(t.Setenv, t.TempDir())
+	testenv.ApplySameDir(t, t.TempDir())
 	orig := registry
 	registry = map[string]Provider{}
 	defer func() { registry = orig }()
@@ -300,7 +300,7 @@ func TestAvailableIDs_IsSorted(t *testing.T) {
 }
 
 func TestCheckCredentials_FallsBackToAvailableStrategy(t *testing.T) {
-	testenv.ApplySameDir(t.Setenv, t.TempDir())
+	testenv.ApplySameDir(t, t.TempDir())
 	config.Override(t, config.DefaultConfig())
 
 	orig := registry

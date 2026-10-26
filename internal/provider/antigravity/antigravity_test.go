@@ -307,12 +307,9 @@ func TestPeriodTypeForTier(t *testing.T) {
 func applyAntigravityTestEnv(t *testing.T) string {
 	t.Helper()
 	cfg := t.TempDir()
-	home := t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", cfg)
 	t.Setenv("AppData", cfg)
-	t.Setenv("HOME", home)
-	t.Setenv("USERPROFILE", home)
-	testenv.ApplyVibeusage(t.Setenv, t.TempDir())
+	testenv.ApplyVibeusage(t, t.TempDir())
 	configDir, err := os.UserConfigDir()
 	if err != nil {
 		t.Fatalf("UserConfigDir: %v", err)

@@ -206,7 +206,7 @@ func TestHistoryRecordResult(t *testing.T) {
 
 func TestRunHistoryRecordsLiveFetchAndOutputsJSON(t *testing.T) {
 	setHistoryTestContext(t, historyCmd)
-	testenv.ApplyVibeusage(t.Setenv, t.TempDir())
+	testenv.ApplyVibeusage(t, t.TempDir())
 	at := time.Now().UTC().Add(-time.Second)
 	reset := at.Add(24 * time.Hour)
 	snapshot := models.UsageSnapshot{
@@ -252,7 +252,7 @@ func TestRunHistoryRecordsLiveFetchAndOutputsJSON(t *testing.T) {
 
 func TestRunHistoryReportsPartialFetchFailure(t *testing.T) {
 	setHistoryTestContext(t, historyCmd)
-	testenv.ApplyVibeusage(t.Setenv, t.TempDir())
+	testenv.ApplyVibeusage(t, t.TempDir())
 	at := time.Now().UTC().Add(-time.Second)
 	providerMap := map[string][]fetch.Strategy{
 		"claude": {historyTestStrategy{available: true, result: fetch.ResultOK(models.UsageSnapshot{
@@ -282,7 +282,7 @@ func TestRunHistoryReportsPartialFetchFailure(t *testing.T) {
 
 func TestRunHistoryRejectsPeriodlessSnapshotInsteadOfRenderingEmptyTable(t *testing.T) {
 	setHistoryTestContext(t, historyCmd)
-	testenv.ApplyVibeusage(t.Setenv, t.TempDir())
+	testenv.ApplyVibeusage(t, t.TempDir())
 	providerMap := map[string][]fetch.Strategy{
 		"opencode": {historyTestStrategy{available: true, result: fetch.ResultOK(models.UsageSnapshot{
 			Provider: "opencode", FetchedAt: time.Now().UTC().Add(-time.Second),
@@ -307,7 +307,7 @@ func TestRunHistoryRejectsPeriodlessSnapshotInsteadOfRenderingEmptyTable(t *test
 
 func TestRunHistoryFailsWhenEveryProviderFetchFails(t *testing.T) {
 	setHistoryTestContext(t, historyCmd)
-	testenv.ApplyVibeusage(t.Setenv, t.TempDir())
+	testenv.ApplyVibeusage(t, t.TempDir())
 	providerMap := map[string][]fetch.Strategy{
 		"claude": {historyTestStrategy{available: true, result: fetch.ResultFail("timeout")}},
 		"codex":  {historyTestStrategy{available: true, result: fetch.ResultFail("service unavailable")}},
@@ -336,7 +336,7 @@ func TestRunHistoryFailsWhenEveryProviderFetchFails(t *testing.T) {
 
 func TestRunHistoryMarksFreshCachedSnapshot(t *testing.T) {
 	setHistoryTestContext(t, historyCmd)
-	testenv.ApplyVibeusage(t.Setenv, t.TempDir())
+	testenv.ApplyVibeusage(t, t.TempDir())
 	at := time.Now().UTC().Add(-10 * time.Second)
 	snapshot := models.UsageSnapshot{
 		Provider:  "claude",
@@ -375,7 +375,7 @@ func TestRunHistoryMarksFreshCachedSnapshot(t *testing.T) {
 
 func TestRunHistoryRecordBypassesFreshCacheAndWritesLiveSample(t *testing.T) {
 	setHistoryTestContext(t, historyRecordCmd)
-	testenv.ApplyVibeusage(t.Setenv, t.TempDir())
+	testenv.ApplyVibeusage(t, t.TempDir())
 	cachedAt := time.Now().UTC().Add(-10 * time.Second)
 	if err := (config.FileCache{}).Save(models.UsageSnapshot{Provider: "claude", FetchedAt: cachedAt}); err != nil {
 		t.Fatalf("saving fresh cache: %v", err)
@@ -406,7 +406,7 @@ func TestRunHistoryRecordBypassesFreshCacheAndWritesLiveSample(t *testing.T) {
 
 func TestRunHistoryRecordRejectsDisabledAndCachedOnlyRuns(t *testing.T) {
 	setHistoryTestContext(t, historyRecordCmd)
-	testenv.ApplyVibeusage(t.Setenv, t.TempDir())
+	testenv.ApplyVibeusage(t, t.TempDir())
 	providerMap := map[string][]fetch.Strategy{
 		"claude": {historyTestStrategy{available: true, result: fetch.ResultFatal("should not fetch")}},
 	}
@@ -438,7 +438,7 @@ func TestRunHistoryRecordRejectsDisabledAndCachedOnlyRuns(t *testing.T) {
 }
 
 func TestHistoryClearPromptsAndClearsOneProvider(t *testing.T) {
-	testenv.ApplyVibeusage(t.Setenv, t.TempDir())
+	testenv.ApplyVibeusage(t, t.TempDir())
 	at := time.Now().Add(-time.Minute)
 	if err := history.Append("claude", storedHistorySnapshot("claude", at)); err != nil {
 		t.Fatalf("preparing Claude history: %v", err)
@@ -475,7 +475,7 @@ func TestHistoryClearPromptsAndClearsOneProvider(t *testing.T) {
 }
 
 func TestHistoryClearDeclinedAndJSONRequiresForce(t *testing.T) {
-	testenv.ApplyVibeusage(t.Setenv, t.TempDir())
+	testenv.ApplyVibeusage(t, t.TempDir())
 	at := time.Now().Add(-time.Minute)
 	if err := history.Append("claude", storedHistorySnapshot("claude", at)); err != nil {
 		t.Fatalf("preparing history: %v", err)
@@ -520,7 +520,7 @@ func TestHistoryClearDeclinedAndJSONRequiresForce(t *testing.T) {
 }
 
 func TestHistoryClearQuietRequiresForceAndPrintsNothing(t *testing.T) {
-	testenv.ApplyVibeusage(t.Setenv, t.TempDir())
+	testenv.ApplyVibeusage(t, t.TempDir())
 	at := time.Now().Add(-time.Minute)
 	for _, providerID := range []string{"claude", "codex"} {
 		if err := history.Append(providerID, storedHistorySnapshot(providerID, at)); err != nil {
