@@ -655,3 +655,89 @@ func TestParseAGYCLIResponse(t *testing.T) {
 		t.Errorf("period[1] utilization = %d, want 4", p2.Utilization)
 	}
 }
+
+func TestParseAGYCreditsResponse(t *testing.T) {
+	sample := `{"conversation_id":"","status":"SUCCESS","response":"Remaining credits\t5705\n","command":{"name":"credits","data":{"remaining_credits":5705}}}`
+	got, ok := parseAGYCreditsResponse([]byte(sample))
+	if !ok || got != 5705 {
+		t.Fatalf("parseAGYCreditsResponse = (%v, %v), want (5705, true)", got, ok)
+	}
+
+	zero, ok := parseAGYCreditsResponse([]byte(`{"command":{"name":"credits","data":{"remaining_credits":0}}}`))
+	if !ok || zero != 0 {
+		t.Errorf("zero credits = (%v, %v), want (0, true)", zero, ok)
+	}
+
+	for name, in := range map[string]string{
+		"not json":      `oops`,
+		"missing field": `{"command":{"name":"credits","data":{}}}`,
+		"negative":      `{"command":{"name":"credits","data":{"remaining_credits":-1}}}`,
+		"empty":         ``,
+	} {
+		if v, ok := parseAGYCreditsResponse([]byte(in)); ok {
+			t.Errorf("%s: got (%v, true), want ok=false", name, v)
+		}
+	}
+}
+
+// writeFakeAGY installs a stub `agy` first on PATH that answers /usage and
+// /credits with the given scripted outputs ("FAIL" makes the call exit 1).
+func writeFakeAGY(t *testing.T, usageJSON, creditsJSON string) {
+	t.Helper()
+	dir := t.TempDir()
+	script := "#!/bin/sh\ncase \"$2\" in\n"
+	for cmd, out := range map[string]string{"/usage": usageJSON, "/credits": creditsJSON} {
+		if out == "FAIL" {
+			script += cmd + ") exit 1;;\n"
+		} else {
+			script += cmd + ") cat <<'EOF'\n" + out + "\nEOF\n;;\n"
+		}
+	}
+	script += "esac\n"
+	if err := os.WriteFile(filepath.Join(dir, "agy"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
+const fakeUsageJSON = `{"status":"SUCCESS","command":{"name":"usage","data":{"groups":[{"name":"Gemini Models","buckets":[{"id":"w","window":"weekly","remaining_fraction":0.5,"reset_time":"2026-08-13T20:27:25Z"}]}]}}}`
+
+func TestAGYCLIStrategy_FetchIncludesCredits(t *testing.T) {
+	writeFakeAGY(t, fakeUsageJSON, `{"status":"SUCCESS","command":{"name":"credits","data":{"remaining_credits":5705}}}`)
+	res, err := (&AGYCLIStrategy{Timeout: 10}).Fetch(context.Background())
+	if err != nil || !res.Success || res.Snapshot == nil {
+		t.Fatalf("Fetch failed: res=%+v err=%v", res, err)
+	}
+	b := res.Snapshot.Billing
+	if b == nil || b.Credits == nil || *b.Credits != 5705 {
+		t.Fatalf("Billing.Credits = %+v, want 5705", b)
+	}
+	if b.Balance != nil {
+		t.Errorf("Billing.Balance = %v, credits must not be reported as a dollar balance", *b.Balance)
+	}
+	if len(res.Snapshot.Periods) != 1 {
+		t.Errorf("periods = %d, want 1", len(res.Snapshot.Periods))
+	}
+}
+
+func TestAGYCLIStrategy_CreditsFailureIsNonFatal(t *testing.T) {
+	writeFakeAGY(t, fakeUsageJSON, "FAIL")
+	res, err := (&AGYCLIStrategy{Timeout: 10}).Fetch(context.Background())
+	if err != nil || !res.Success || res.Snapshot == nil {
+		t.Fatalf("usage must still succeed when /credits fails: res=%+v err=%v", res, err)
+	}
+	if res.Snapshot.Billing != nil {
+		t.Errorf("Billing = %+v, want nil when /credits fails", res.Snapshot.Billing)
+	}
+	if len(res.Snapshot.Periods) != 1 {
+		t.Errorf("periods = %d, want 1", len(res.Snapshot.Periods))
+	}
+}
+
+func TestAGYCLIStrategy_CreditsGarbageIsNonFatal(t *testing.T) {
+	writeFakeAGY(t, fakeUsageJSON, "not json")
+	res, err := (&AGYCLIStrategy{Timeout: 10}).Fetch(context.Background())
+	if err != nil || !res.Success || res.Snapshot == nil || res.Snapshot.Billing != nil {
+		t.Fatalf("garbage /credits should be ignored: res=%+v err=%v", res, err)
+	}
+}

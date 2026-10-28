@@ -3,6 +3,7 @@ package display
 import (
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -154,14 +155,26 @@ func formatOverageLine(o *models.OverageUsage, label string) string {
 // formatBalance renders a standalone balance line from billing detail.
 // Returns empty string when no balance is available.
 func formatBalance(billing *models.BillingDetail) string {
-	if billing == nil || billing.Balance == nil {
+	if billing == nil {
 		return ""
+	}
+	if billing.Balance == nil {
+		return formatCredits(billing)
 	}
 	bal := *billing.Balance
 	if bal < 0 {
 		return fmt.Sprintf("Balance: -$%.2f", -bal)
 	}
 	return fmt.Sprintf("Balance: $%.2f", bal)
+}
+
+// formatCredits renders a non-currency credit count (e.g. Antigravity AI
+// credits). Returns empty string when no credit count is available.
+func formatCredits(billing *models.BillingDetail) string {
+	if billing == nil || billing.Credits == nil {
+		return ""
+	}
+	return "Credits: " + strconv.FormatFloat(*billing.Credits, 'f', -1, 64)
 }
 
 func formatResetCount(resets *models.UsageLimitResets) string {
@@ -404,6 +417,9 @@ func formatBillingDetail(snapshot models.UsageSnapshot) string {
 			} else {
 				parts = append(parts, fmt.Sprintf("Balance: %s%.2f", sym, bal))
 			}
+		}
+		if c := formatCredits(snapshot.Billing); c != "" {
+			parts = append(parts, c)
 		}
 		if snapshot.Billing.AutoReload != nil {
 			status := "Off"

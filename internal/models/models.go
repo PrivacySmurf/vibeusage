@@ -112,6 +112,9 @@ func (p UsagePeriod) TimeUntilReset() *time.Duration {
 type BillingDetail struct {
 	Balance    *float64 `json:"balance,omitempty"`     // prepaid balance in dollars (negative = overspent)
 	AutoReload *bool    `json:"auto_reload,omitempty"` // nil = unknown
+	// Credits is a remaining provider-specific credit count (e.g. Antigravity
+	// AI Premium credits). It is NOT a currency amount; never render it as $.
+	Credits *float64 `json:"credits,omitempty"`
 }
 
 // UsageLimitReset is one available reset for the provider's usage limits.

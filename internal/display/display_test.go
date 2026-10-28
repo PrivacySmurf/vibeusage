@@ -798,6 +798,25 @@ func TestFormatBalance_NilBalance(t *testing.T) {
 	}
 }
 
+func TestFormatBalance_CreditsOnly(t *testing.T) {
+	c := 5705.0
+	got := formatBalance(&models.BillingDetail{Credits: &c})
+	if got != "Credits: 5705" {
+		t.Errorf("formatBalance = %q, want %q", got, "Credits: 5705")
+	}
+	if strings.Contains(got, "$") {
+		t.Errorf("credits must not render as currency: %q", got)
+	}
+}
+
+func TestFormatBalance_DollarBalanceWinsOverCredits(t *testing.T) {
+	bal, c := 1.5, 10.0
+	got := formatBalance(&models.BillingDetail{Balance: &bal, Credits: &c})
+	if got != "Balance: $1.50" {
+		t.Errorf("formatBalance = %q, want %q", got, "Balance: $1.50")
+	}
+}
+
 func TestFormatBalance_Positive(t *testing.T) {
 	bal := 12.34
 	got := formatBalance(&models.BillingDetail{Balance: &bal})

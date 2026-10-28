@@ -20,6 +20,10 @@ and this project attempts to adhere to [Semantic Versioning](https://semver.org/
 
 ## [Unreleased]
 
+### Added
+
+- Antigravity now shows the remaining AI Premium credit balance (`Credits: N`) in the usage panel and as `billing.credits` in `--json`, read from `agy -p /credits`. The count is not a currency amount and is never shown with `$`; a failing `/credits` call leaves the usage periods intact.
+
 ## [0.13.0]
 
 ### Added

@@ -588,7 +588,51 @@ func (s *AGYCLIStrategy) Fetch(ctx context.Context) (fetch.FetchResult, error) {
 		return fetch.ResultFail("failed to parse agy CLI output"), nil
 	}
 
+	// AI Premium credit balance is supplemental: any failure keeps the usage data.
+	if credits, ok := s.fetchCredits(ctx, binPath); ok {
+		snapshot.Billing = &models.BillingDetail{Credits: &credits}
+	}
+
 	return fetch.ResultOK(*snapshot), nil
+}
+
+// fetchCredits runs `agy -p /credits` and returns the remaining AI credits.
+// ok is false on any failure (non-fatal for the caller).
+func (s *AGYCLIStrategy) fetchCredits(ctx context.Context, binPath string) (credits float64, ok bool) {
+	execCtx := ctx
+	if s.Timeout > 0 {
+		var cancel context.CancelFunc
+		execCtx, cancel = context.WithTimeout(ctx, time.Duration(s.Timeout*float64(time.Second)))
+		defer cancel()
+	}
+	out, err := exec.CommandContext(execCtx, binPath, "-p", "/credits", "--output-format", "json").Output()
+	if err != nil {
+		return 0, false
+	}
+	return parseAGYCreditsResponse(out)
+}
+
+type agyCreditsOutput struct {
+	Status  string `json:"status"`
+	Command struct {
+		Name string `json:"name"`
+		Data struct {
+			RemainingCredits *float64 `json:"remaining_credits"`
+		} `json:"data"`
+	} `json:"command"`
+}
+
+// parseAGYCreditsResponse extracts command.data.remaining_credits from the
+// `agy -p /credits --output-format json` output.
+func parseAGYCreditsResponse(data []byte) (float64, bool) {
+	var resp agyCreditsOutput
+	if err := json.Unmarshal(data, &resp); err != nil {
+		return 0, false
+	}
+	if resp.Command.Data.RemainingCredits == nil || *resp.Command.Data.RemainingCredits < 0 {
+		return 0, false
+	}
+	return *resp.Command.Data.RemainingCredits, true
 }
 
 type agyCLIOutput struct {
