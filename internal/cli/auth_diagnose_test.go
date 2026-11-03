@@ -88,6 +88,9 @@ func TestAuthDiagnoseProviderWithoutDiagnoser(t *testing.T) {
 	if !strings.Contains(output, "auth diagnostics") {
 		t.Errorf("output missing title: %q", output)
 	}
+	if !strings.Contains(output, "Binary") || !strings.Contains(output, "(rev ") {
+		t.Errorf("output missing binary build identity line: %q", output)
+	}
 	if !strings.Contains(output, "Credential detected") {
 		t.Errorf("output missing generic credential section: %q", output)
 	}

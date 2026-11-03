@@ -51,6 +51,7 @@ The `just run` Just command runs `go run ./cmd/vibeusage` with these env vars. W
 - `--no-cache` flag disables cache fallback entirely (fails fast on API errors)
 - Error messages: include underlying errors (e.g. JSON parse errors) — don't swallow them
 - Error hints: only suggest `vibeusage auth` when the error is actually about credentials
+- Credential-file inspection: use `python3 scripts/inspect-creds.py <file> [dot.key.path]` to inspect JSON or YAML credential files (`credentials.json`, `~/.local/share/dsh/.credentials.yaml`, OAuth token files). Never run ad-hoc Python/shell one-liners that print raw credential objects or `refs` values to stdout.
 
 ### Git hygiene
 

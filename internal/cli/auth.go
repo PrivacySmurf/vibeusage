@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"runtime/debug"
 	"sort"
 	"strings"
 	"time"
@@ -198,6 +199,8 @@ func authDiagnoseProvider(ctx context.Context, providerID string, p provider.Pro
 	outln(title + " auth diagnostics")
 	outln("")
 
+	outln(fmt.Sprintf("  %-22s %s", "Binary", diagnoseBuildIdentity()))
+
 	found, source, path := provider.FindCredential(providerID)
 	if found {
 		detail := source
@@ -233,6 +236,32 @@ func authDiagnoseProvider(ctx context.Context, providerID string, p provider.Pro
 		outln(fmt.Sprintf("  %-22s %s %s", d.Name, rendered, d.Detail))
 	}
 	return nil
+}
+
+func diagnoseBuildIdentity() string {
+	exe, err := os.Executable()
+	if err != nil || exe == "" {
+		exe = "unknown"
+	}
+	rev := "unknown"
+	modified := ""
+	if info, ok := debug.ReadBuildInfo(); ok {
+		for _, s := range info.Settings {
+			switch s.Key {
+			case "vcs.revision":
+				if len(s.Value) > 12 {
+					rev = s.Value[:12]
+				} else if s.Value != "" {
+					rev = s.Value
+				}
+			case "vcs.modified":
+				if s.Value == "true" {
+					modified = " (dirty)"
+				}
+			}
+		}
+	}
+	return fmt.Sprintf("%s (rev %s%s)", exe, rev, modified)
 }
 
 func validateAuthArgs(cmd *cobra.Command, args []string) error {

@@ -22,6 +22,10 @@ fmt *ARGS='.':
 lint:
     pre-commit run --all-files
 
+# Check GitHub Action pin versions against live upstream releases
+check-actions:
+    pre-commit run --hook-stage manual check --all-files
+
 # CLI
 run *ARGS:
     go run ./cmd/vibeusage {{ ARGS }}
@@ -34,9 +38,11 @@ screenshots:
 test *ARGS:
     go test ./... -race {{ ARGS }}
 
-# Run static analysis
+# Run static analysis (host OS plus Linux/Windows cross-OS build-tag checks)
 vet:
     go vet ./...
+    GOOS=linux GOARCH=amd64 go vet ./...
+    GOOS=windows GOARCH=amd64 go vet ./...
 
 # Check dependencies for known vulnerabilities
 vuln:

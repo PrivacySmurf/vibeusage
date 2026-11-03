@@ -22,6 +22,7 @@ repos:
     rev: 35c4cb824d4a6dd81f1d7af18f4821b7357c1e6b # v0.3.0
     hooks:
       - id: check
+        stages: [manual]
         args:
           - --require-sha
           - --fail-on-unknown
