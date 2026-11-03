@@ -5,7 +5,7 @@ import (
 )
 
 func TestUsageCmd_HasProviderSubcommands(t *testing.T) {
-	providers := []string{"claude", "codex", "copilot", "cursor", "gemini", "openrouter", "warp", "kimicode", "amp"}
+	providers := []string{"claude", "codex", "copilot", "cursor", "gemini", "openrouter", "venice", "warp", "kimicode", "amp"}
 	for _, name := range providers {
 		found := false
 		for _, cmd := range usageCmd.Commands() {

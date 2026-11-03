@@ -22,6 +22,7 @@ and this project attempts to adhere to [Semantic Versioning](https://semver.org/
 
 ### Added
 
+- Added Venice AI (`venice`) provider support (`VENICE_API_KEY`, `VENICE_AI_API_KEY`, `vibeusage auth venice`), reporting USD/bundled credit balance (`billing.balance`), DIEM balance (`billing.credits` when positive), and API tier (`identity.plan`) from `GET /api/v1/api_keys/rate_limits` plus Statuspage health from `veniceai-status.com`.
 - Antigravity now shows the remaining AI Premium credit balance (`Credits: N`) in the usage panel and as `billing.credits` in `--json`, read from `agy -p /credits`. The count is not a currency amount and is never shown with `$`; a failing `/credits` call leaves the usage periods intact.
 
 ## [0.13.0]

@@ -163,6 +163,7 @@ var providerDescriptions = map[string]string{
 	"modelstudio": "Alibaba Cloud Model Studio Bailian (alibabacloud.com)",
 	"opencode":    "OpenCode AI coding agent (opencode.ai)",
 	"openrouter":  "OpenRouter unified model gateway (openrouter.ai)",
+	"venice":      "Venice AI inference API (venice.ai)",
 	"warp":        "Warp terminal AI (warp.dev)",
 	"zai":         "Z.ai coding assistant (z.ai)",
 }

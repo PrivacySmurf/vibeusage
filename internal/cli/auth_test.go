@@ -352,6 +352,7 @@ func TestAuthSetCredential_PreservesManualProviderStorageContracts(t *testing.T)
 		{providerID: "minimax", credType: "apikey", jsonKey: "api_key", credential: "  sk-" + "cp-test123  ", want: "sk-" + "cp-test123"},
 		{providerID: "opencode", credType: "session", jsonKey: "session_token", credential: "  opencode-secret  ", want: "opencode-secret"},
 		{providerID: "openrouter", credType: "apikey", jsonKey: "api_key", credential: "  openrouter-secret  ", want: "openrouter-secret"},
+		{providerID: "venice", credType: "apikey", jsonKey: "api_key", credential: "  venice-secret  ", want: "venice-secret"},
 		{providerID: "warp", credType: "apikey", jsonKey: "api_key", credential: "  wk-secret  ", want: "wk-secret"},
 		{providerID: "zai", credType: "apikey", jsonKey: "api_key", credential: "  zai-secret  ", want: "zai-secret"},
 	}

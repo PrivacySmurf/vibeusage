@@ -31,6 +31,7 @@ import (
 	_ "github.com/joshuadavidthomas/vibeusage/internal/provider/minimax"
 	_ "github.com/joshuadavidthomas/vibeusage/internal/provider/modelstudio"
 	_ "github.com/joshuadavidthomas/vibeusage/internal/provider/openrouter"
+	_ "github.com/joshuadavidthomas/vibeusage/internal/provider/venice"
 	_ "github.com/joshuadavidthomas/vibeusage/internal/provider/warp"
 	_ "github.com/joshuadavidthomas/vibeusage/internal/provider/zai"
 )

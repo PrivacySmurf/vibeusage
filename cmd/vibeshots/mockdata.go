@@ -483,6 +483,10 @@ func mockProviderStatuses() map[string]models.ProviderStatus {
 			Level:     models.StatusOperational,
 			UpdatedAt: justNow(),
 		},
+		"venice": {
+			Level:     models.StatusOperational,
+			UpdatedAt: justNow(),
+		},
 		"warp": {
 			Level:     models.StatusOperational,
 			UpdatedAt: justNow(),
