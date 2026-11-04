@@ -1894,3 +1894,144 @@ func TestExecutePipeline_PropagatesProviderToContext(t *testing.T) {
 		t.Errorf("ProviderFromContext(ctx) = %q, want %q", observedProvider, "zai")
 	}
 }
+
+func TestExecutePipeline_PreservesCachedBillingWhenLiveBillingNil(t *testing.T) {
+	credits := 1250.0
+	balance := 42.5
+	cache := newMemCache()
+	cache.data["antigravity"] = models.UsageSnapshot{
+		Provider:  "antigravity",
+		FetchedAt: time.Now().Add(-15 * time.Minute).UTC(),
+		Periods:   []models.UsagePeriod{{Name: "Gemini", Utilization: 10}},
+		Billing: &models.BillingDetail{
+			Credits: &credits,
+			Balance: &balance,
+		},
+		Source: "agy_cli",
+	}
+
+	strategy := &mockStrategy{
+		available: true,
+		fetchFn: func(ctx context.Context) (FetchResult, error) {
+			return ResultOK(models.UsageSnapshot{
+				Provider:  "antigravity",
+				FetchedAt: time.Now().UTC(),
+				Periods:   []models.UsagePeriod{{Name: "Gemini", Utilization: 25}},
+				Billing:   nil,
+				Source:    "oauth",
+			}), nil
+		},
+	}
+
+	cfg := PipelineConfig{
+		Timeout: 5 * time.Second,
+		Cache:   cache,
+	}
+
+	outcome := ExecutePipeline(context.Background(), "antigravity", []Strategy{strategy}, true, cfg)
+	if !outcome.Success {
+		t.Fatalf("expected success, got error: %s", outcome.Error)
+	}
+	if outcome.Snapshot == nil || outcome.Snapshot.Billing == nil {
+		t.Fatal("expected cached Billing to be carried over onto live snapshot, got nil")
+	}
+	if outcome.Snapshot.Billing.Credits == nil || *outcome.Snapshot.Billing.Credits != credits {
+		t.Errorf("outcome.Snapshot.Billing.Credits = %v, want %v", outcome.Snapshot.Billing.Credits, credits)
+	}
+	if outcome.Snapshot.Billing.Balance == nil || *outcome.Snapshot.Billing.Balance != balance {
+		t.Errorf("outcome.Snapshot.Billing.Balance = %v, want %v", outcome.Snapshot.Billing.Balance, balance)
+	}
+
+	saved, err := cache.Load("antigravity")
+	if err != nil || saved == nil || saved.Billing == nil {
+		t.Fatalf("expected saved cache snapshot to retain Billing, got saved=%v err=%v", saved, err)
+	}
+	if saved.Billing.Credits == nil || *saved.Billing.Credits != credits {
+		t.Errorf("saved.Billing.Credits = %v, want %v", saved.Billing.Credits, credits)
+	}
+
+	// Verify fresh non-nil Billing overwrites cached Billing.
+	freshCredits := 980.0
+	freshStrategy := &mockStrategy{
+		available: true,
+		fetchFn: func(ctx context.Context) (FetchResult, error) {
+			return ResultOK(models.UsageSnapshot{
+				Provider:  "antigravity",
+				FetchedAt: time.Now().UTC(),
+				Periods:   []models.UsagePeriod{{Name: "Gemini", Utilization: 30}},
+				Billing:   &models.BillingDetail{Credits: &freshCredits},
+				Source:    "agy_cli",
+			}), nil
+		},
+	}
+	outcome2 := ExecutePipeline(context.Background(), "antigravity", []Strategy{freshStrategy}, true, cfg)
+	if !outcome2.Success || outcome2.Snapshot == nil || outcome2.Snapshot.Billing == nil || outcome2.Snapshot.Billing.Credits == nil {
+		t.Fatalf("expected fresh Billing to succeed, got %+v", outcome2)
+	}
+	if *outcome2.Snapshot.Billing.Credits != freshCredits {
+		t.Errorf("outcome2.Snapshot.Billing.Credits = %v, want %v", *outcome2.Snapshot.Billing.Credits, freshCredits)
+	}
+}
+
+func TestExecutePipeline_FatalFallsBackToStaleCacheWithoutCallingNextStrategy(t *testing.T) {
+	cache := newMemCache()
+	cache.data["venice"] = models.UsageSnapshot{
+		Provider:  "venice",
+		FetchedAt: time.Now().Add(-10 * time.Minute).UTC(),
+		Periods:   []models.UsagePeriod{{Name: "Daily Credits", Utilization: 15}},
+		Source:    "api_key",
+	}
+
+	fallbackCalled := false
+	strategies := []Strategy{
+		&mockStrategy{
+			available: true,
+			fetchFn: func(ctx context.Context) (FetchResult, error) {
+				return ResultFatal("Authentication failed (HTTP 403). Your credentials or session may be expired."), nil
+			},
+		},
+		&mockStrategy{
+			available: true,
+			fetchFn: func(ctx context.Context) (FetchResult, error) {
+				fallbackCalled = true
+				return ResultOK(testSnapshot("venice", "fallback", 50)), nil
+			},
+		},
+	}
+
+	cfg := PipelineConfig{
+		Timeout: 5 * time.Second,
+		Cache:   cache,
+	}
+
+	outcome := ExecutePipeline(context.Background(), "venice", strategies, true, cfg)
+	if fallbackCalled {
+		t.Error("expected ResultFatal not to call subsequent strategies")
+	}
+	if !outcome.Success {
+		t.Fatalf("expected stale cache fallback on ResultFatal when cached snapshot exists, got error: %s", outcome.Error)
+	}
+	if !outcome.Cached || outcome.Source != "cache" {
+		t.Errorf("expected Cached=true Source=%q, got Cached=%v Source=%q", "cache", outcome.Cached, outcome.Source)
+	}
+	if outcome.Snapshot == nil || outcome.Snapshot.Provider != "venice" {
+		t.Errorf("unexpected snapshot: %+v", outcome.Snapshot)
+	}
+
+	// When no cache exists for the provider, ResultFatal must still fail without calling fallback strategies.
+	emptyCfg := PipelineConfig{
+		Timeout: 5 * time.Second,
+		Cache:   newMemCache(),
+	}
+	outcomeNoCache := ExecutePipeline(context.Background(), "venice", strategies, true, emptyCfg)
+	if fallbackCalled {
+		t.Error("expected ResultFatal not to call subsequent strategies when cache is empty")
+	}
+	if outcomeNoCache.Success {
+		t.Error("expected failure when ResultFatal occurs and no cached snapshot exists")
+	}
+	if !strings.Contains(outcomeNoCache.Error, "HTTP 403") {
+		t.Errorf("expected HTTP 403 error message, got %q", outcomeNoCache.Error)
+	}
+}
+

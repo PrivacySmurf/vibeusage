@@ -157,6 +157,11 @@ func ExecutePipeline(ctx context.Context, providerID string, strategies []Strate
 				continue
 			}
 			if cfg.Cache != nil {
+				if result.Snapshot.Billing == nil {
+					if cached, err := cfg.Cache.Load(providerID); err == nil && cachedSnapshotMatchesProvider(cached, providerID) && cached.Billing != nil {
+						result.Snapshot.Billing = cached.Billing
+					}
+				}
 				if err := cfg.Cache.Save(*result.Snapshot); err != nil {
 					logger.Warn("saving cached snapshot failed", "provider", providerID, "err", err)
 				}
@@ -187,15 +192,10 @@ func ExecutePipeline(ctx context.Context, providerID string, strategies []Strate
 			}
 		}
 
-		if !result.ShouldFallback {
-			return FetchOutcome{
-				ProviderID: providerID,
-				Success:    false,
-				Error:      result.Error,
-			}
-		}
-
 		lastErr = result.Error
+		if !result.ShouldFallback {
+			break
+		}
 	}
 
 	// All strategies failed — try cache fallback.
